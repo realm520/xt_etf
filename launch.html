@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Batch Launch Market Making Pairs</title>
+  <script>
+    async function launchPairs() {
+      const pairsText = document.getElementById("pairs").value;
+      const lines = pairsText.trim().split("\n");
+      const responses = [];
+
+      for (const line of lines) {
+        try {
+          const config = JSON.parse(line);
+          const symbol = config.symbol;
+          if (!symbol) {
+            responses.push("Missing 'symbol' in config JSON");
+            continue;
+          }
+
+          const res = await fetch(`http://127.0.0.1:8000/add_or_update/${symbol}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(config)
+          });
+
+          if (!res.ok) {
+            responses.push(`${symbol}: Failed to update config (${res.status})`);
+            continue;
+          }
+
+          const startRes = await fetch(`http://127.0.0.1:8000/start/${symbol}`, { method: 'POST' });
+          if (startRes.ok) {
+            responses.push(`${symbol}: Started successfully`);
+          } else {
+            responses.push(`${symbol}: Config updated, but start failed (${startRes.status})`);
+          }
+        } catch (e) {
+          responses.push(`Error parsing line: ${e.message}`);
+        }
+      }
+
+      document.getElementById("output").textContent = responses.join("\n");
+    }
+  </script>
+</head>
+<body>
+  <h2>Batch Launch Market Making Pairs</h2>
+  <textarea id="pairs" rows="15" cols="100" placeholder='One JSON per line, e.g.\n{"symbol": "stg5s", "env": "prod", "bid_ask_spread": 0.05}'></textarea><br>
+  <button onclick="launchPairs()">Launch</button>
+  <pre id="output"></pre>
+</body>
+</html>
