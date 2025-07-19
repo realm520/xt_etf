@@ -1,0 +1,151 @@
+# ETF 策略配置文件
+# 保持所有参数值与原始文件完全一致
+
+strategies:
+  stg3l:
+    # 基础配置
+    prefix: "stg3l"
+    env: "prod"
+    clientOrderId: "1655"
+    apikey: "APIKey.json"
+    bnsymbol: "STGUSDT"
+    currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
+    
+    # 精度设置
+    precision: 6
+    prec_amount: 2
+    precision_amount: 0
+    precision_price: 4
+    
+    # 时间间隔（秒）
+    sleep_interval: 5        # 主循环间隔 - STG3L 特有的5秒
+    Hedging_interval: 20
+    washing_interval: 5      # 洗盘间隔 - STG3L 特有的5秒
+    kline_continuity_interval: 60
+    
+    # 功能开关
+    Enable_risk_controller: false
+    Enable_wash_trading: true
+    Enable_hedging: false
+    Enable_market_making: true
+    cancel_all_open_orders: false
+    pre_make_orders: false
+    Exit_with_cancel_all_open_orders: false
+    
+    # 交易参数
+    leverage: 5
+    wash: "mid_price"
+    anti_pin_usdt: 300
+    anti_pin_rate: 0.2
+    bid_ask_spread: 0.01
+    
+  stg3s:
+    # 基础配置
+    prefix: "stg3s"
+    env: "prod"
+    clientOrderId: "1655"
+    apikey: "APIKey.json"
+    bnsymbol: "STGUSDT"
+    currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
+    
+    # 精度设置
+    precision: 6
+    prec_amount: 2
+    precision_amount: 0
+    precision_price: 4
+    
+    # 时间间隔（秒）
+    sleep_interval: 1        # 主循环间隔 - 标准1秒
+    Hedging_interval: 20
+    washing_interval: 1      # 洗盘间隔 - 标准1秒
+    kline_continuity_interval: 60
+    
+    # 功能开关
+    Enable_risk_controller: false
+    Enable_wash_trading: true
+    Enable_hedging: false
+    Enable_market_making: true
+    cancel_all_open_orders: false
+    pre_make_orders: false
+    Exit_with_cancel_all_open_orders: false
+    
+    # 交易参数
+    leverage: 5
+    wash: "mid_price"
+    anti_pin_usdt: 300
+    anti_pin_rate: 0.2
+    bid_ask_spread: 0.01
+    
+  stg5l:
+    # 基础配置
+    prefix: "stg5l"
+    env: "prod"
+    clientOrderId: "1655"
+    apikey: "APIKey.json"
+    bnsymbol: "STGUSDT"
+    currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
+    
+    # 精度设置
+    precision: 6
+    prec_amount: 2
+    precision_amount: 0
+    precision_price: 4
+    
+    # 时间间隔（秒）
+    sleep_interval: 1        # 主循环间隔
+    Hedging_interval: 20
+    washing_interval: 1      # 洗盘间隔
+    kline_continuity_interval: 60
+    
+    # 功能开关
+    Enable_risk_controller: false
+    Enable_wash_trading: true
+    Enable_hedging: false
+    Enable_market_making: true
+    cancel_all_open_orders: true    # STG5L 特有：启动时取消所有订单
+    pre_make_orders: false
+    Exit_with_cancel_all_open_orders: false
+    
+    # 交易参数
+    leverage: 5
+    wash: "mid_price"
+    anti_pin_usdt: 300
+    anti_pin_rate: 0.2
+    bid_ask_spread: 0.01
+    
+  stg5s:
+    # 基础配置
+    prefix: "stg5s"
+    env: "prod"
+    clientOrderId: "1655"
+    apikey: "APIKey.json"
+    bnsymbol: "STGUSDT"
+    currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
+    
+    # 精度设置
+    precision: 6
+    prec_amount: 2
+    precision_amount: 0
+    precision_price: 4
+    
+    # 时间间隔（秒）
+    sleep_interval: 1        # 主循环间隔
+    Hedging_interval: 20
+    washing_interval: 1      # 洗盘间隔
+    kline_continuity_interval: 60
+    
+    # 功能开关
+    Enable_risk_controller: false
+    Enable_wash_trading: true
+    Enable_hedging: false
+    Enable_market_making: true
+    cancel_all_open_orders: false
+    pre_make_orders: false
+    Exit_with_cancel_all_open_orders: false
+    
+    # 交易参数
+    leverage: 5
+    wash: "mid_price"
+    anti_pin_usdt: 300
+    anti_pin_rate: 0.2
+    bid_ask_spread: 0.05    # STG5S 特有：5%价差（其他都是1%）

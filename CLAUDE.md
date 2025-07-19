@@ -50,15 +50,39 @@ pip install -r requirements.txt
 ```
 
 ### Running the Trading System
+
+#### Recommended Method (New Unified System)
+```bash
+# Using strategy mode
+python run_etf.py --strategy stg3l  # 3x long strategy
+python run_etf.py --strategy stg3s  # 3x short strategy
+python run_etf.py --strategy stg5l  # 5x long strategy
+python run_etf.py --strategy stg5s  # 5x short strategy
+
+# Using convenience scripts
+./scripts/run_stg3l.sh  # 3x long
+./scripts/run_stg3s.sh  # 3x short
+./scripts/run_stg5l.sh  # 5x long
+./scripts/run_stg5s.sh  # 5x short
+
+# Override parameters
+python run_etf.py --strategy stg3l --bid-ask-spread 0.02
+python run_etf.py --strategy stg5s --env qa
+```
+
+#### Legacy Method (Original scripts archived in `legacy/`)
+```bash
+# Original scripts (still available but not recommended)
+python legacy/run_etf_stg3l.py
+python legacy/run_etf_stg3s.py
+python legacy/run_etf_stg5l.py
+python legacy/run_etf_stg5s.py
+```
+
+#### Other Components
 ```bash
 # Using PM2 (production)
 pm2 start run.sh
-
-# Direct execution of ETF strategies
-python run_etf.py stg3l  # 3x long strategy
-python run_etf.py stg3s  # 3x short strategy
-python run_etf.py stg5l  # 5x long strategy
-python run_etf.py stg5s  # 5x short strategy
 
 # Run specific components
 python net_value_stg3l.py  # Net value calculation
