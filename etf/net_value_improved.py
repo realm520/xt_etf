@@ -236,6 +236,8 @@ class ImprovedNetValue:
                 "timestamp": time.time(),
             })
             v = self.max_single_change if v > 0 else -self.max_single_change
+            # 调整p1为限制后的价格，用于后续再平衡计算
+            p1 = p0 * (1 + v)
 
         # 计算净值变化
         side = 1 if v > 0 else -1
@@ -245,7 +247,15 @@ class ImprovedNetValue:
         while abs(v) > self.rebalance:
             adjustment = side * self.rebalance
             p0 = p0 * (1 + adjustment)
-            net_value = net_value * (1 + self.m_lever * adjustment)
+
+            # 按照原版逻辑计算再平衡时的净值变化
+            if self.long:
+                # 做多：价格上涨净值增加，价格下跌净值减少
+                net_value = net_value * (1 + self.m_lever * adjustment)
+            else:
+                # 做空：价格上涨净值减少，价格下跌净值增加
+                net_value = net_value * (1 - self.m_lever * adjustment)
+
             v = (p1 - p0) / p0
             logger.info(
                 f"触发再平衡: 调整幅度={adjustment:.4f}, 新净值={net_value:.6f}"

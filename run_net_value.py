@@ -3,6 +3,7 @@
 """
 统一的净值计算程序
 支持通过命令行参数选择不同的ETF策略
+使用改进版净值计算器，支持断线恢复和异常保护
 
 使用方法:
     python run_net_value.py --strategy stg3l  # 3倍做多
@@ -19,7 +20,7 @@ import sys
 import yaml
 from typing import Dict, Any
 
-from net_value import NetValue
+from etf.net_value_improved import ImprovedNetValue
 
 # 设置日志
 logging.basicConfig(
@@ -116,9 +117,9 @@ def main():
         f"参数配置: {json.dumps(net_value_params, indent=2, ensure_ascii=False)}"
     )
 
-    # 创建并运行净值计算器
+    # 创建并运行改进版净值计算器
     try:
-        net_value_calculator = NetValue(**net_value_params)
+        net_value_calculator = ImprovedNetValue(**net_value_params)
         net_value_calculator.run()
     except KeyboardInterrupt:
         logging.info("净值计算器被用户中断")

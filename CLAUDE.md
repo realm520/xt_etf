@@ -148,13 +148,50 @@ python legacy/run_etf_stg5s.py
 
 #### Other Components
 ```bash
-# Run net value calculation (unified)
-python run_net_value.py
+# Run net value calculation (unified with improved version)
+python run_net_value.py --strategy stg3l  # 3x long
+python run_net_value.py --strategy stg3s  # 3x short
+python run_net_value.py --strategy stg5l  # 5x long
+python run_net_value.py --strategy stg5s  # 5x short
 
-# Run specific components
-python net_value_stg3l.py  # Net value calculation (legacy)
+# Test improved net value calculator features
+python test_improved_net_value.py
+
+# Run specific components (legacy)
 python hedging_stg3l.py    # Hedging operations
 ```
+
+#### Improved Net Value Calculator Features
+
+The system now uses `etf.net_value_improved.ImprovedNetValue` which provides:
+
+1. **Automatic Recovery After Restart**
+   - Detects program restart and recovers net value during disconnection
+   - Calculates missed management fees during downtime
+   - Records recovery events for monitoring
+
+2. **Price Spike Protection**
+   - Limits single price change to 10% (configurable via `max_single_change`)
+   - Records abnormal price events for analysis
+   - Prevents calculation errors from extreme market moves
+
+3. **Enhanced Data Persistence**
+   - Stores detailed net value data in Redis with timestamps
+   - Maintains historical records (last 1000 entries)
+   - Tracks total fees deducted and update counts
+
+4. **Monitoring and Debugging**
+   - Records abnormal events (price spikes, long restarts, recoveries)
+   - Detailed logging with timestamps and context
+   - Redis keys:
+     - Simple net value: `netvalue_{symbol}{leverage}{l/s}`
+     - Detailed data: `netvalue_{symbol}{leverage}{l/s}_detail`
+     - History: `netvalue_{symbol}{leverage}{l/s}_history`
+
+5. **Configuration Parameters**
+   - `max_single_change`: Maximum allowed single price change (default: 0.10)
+   - `max_restart_gap`: Maximum restart gap in seconds (default: 300)
+   - All other parameters remain compatible with the original version
 
 ## Architecture Overview
 

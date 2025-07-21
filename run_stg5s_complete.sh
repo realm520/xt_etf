@@ -107,7 +107,7 @@ start_net_value() {
     if pgrep -f "run_net_value.py" > /dev/null; then
         warning "净值计算服务已在运行"
     else
-        python run_net_value.py > logs/etf/net_value.log 2>&1 &
+        python run_net_value.py --strategy stg5s > logs/etf/net_value_stg5s.log 2>&1 &
         NET_VALUE_PID=$!
         sleep 2
         if kill -0 $NET_VALUE_PID 2>/dev/null; then

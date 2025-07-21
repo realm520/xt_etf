@@ -3,7 +3,6 @@ from etf.washing import WashController
 from etf.market_making import MarketMaker
 from etf.order_manager import OrderManager
 from etf.xt import Spot
-from net_value import NetValue
 from hedging import Hedge
 import json
 import time

@@ -16,11 +16,11 @@
 - `run_etf_stg5l.py` - 5倍做多策略（启动时取消订单）
 - `run_etf_stg5s.py` - 5倍做空策略（5%买卖价差）
 
-### 净值计算文件
-- `net_value_stg3l.py` - 3倍做多净值计算器
-- `net_value_stg3s.py` - 3倍做空净值计算器
-- `net_value_stg5l.py` - 5倍做多净值计算器
-- `net_value_stg5s.py` - 5倍做空净值计算器
+### 净值计算文件（已删除）
+- ~~`net_value_stg3l.py`~~ - 3倍做多净值计算器（已迁移到增强版）
+- ~~`net_value_stg3s.py`~~ - 3倍做空净值计算器（已迁移到增强版）
+- ~~`net_value_stg5l.py`~~ - 5倍做多净值计算器（已迁移到增强版）
+- ~~`net_value_stg5s.py`~~ - 5倍做空净值计算器（已迁移到增强版）
 
 ## 推荐使用方式
 
@@ -70,10 +70,8 @@ python legacy/run_etf_stg5s.py
 
 ### 净值计算
 ```bash
-python legacy/net_value_stg3l.py
-python legacy/net_value_stg3s.py
-python legacy/net_value_stg5l.py
-python legacy/net_value_stg5s.py
+# 原始脚本已删除，请使用新的统一方式
+# 旧版本存在逻辑错误，已完全迁移到增强版
 ```
 
 ## 注意事项
