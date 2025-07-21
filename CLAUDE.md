@@ -102,11 +102,11 @@ python run_etf.py --strategy stg5s  # 5x short strategy
 ./scripts/run_stg5l.sh  # 5x long
 ./scripts/run_stg5s.sh  # 5x short
 
-# Using complete startup scripts (includes all dependencies)
-./run_stg3l_complete.sh  # 3x long with Redis check, net value service
-./run_stg3s_complete.sh  # 3x short with full environment setup
-./run_stg5l_complete.sh  # 5x long with complete initialization
-./run_stg5s_complete.sh  # 5x short with all services
+# Development mode (starts both net value and trading)
+./scripts/dev_start.sh stg3l  # 3x long with net value service
+./scripts/dev_start.sh stg3s  # 3x short with net value service
+./scripts/dev_start.sh stg5l  # 5x long with net value service
+./scripts/dev_start.sh stg5s  # 5x short with net value service
 
 # Override parameters
 python run_etf.py --strategy stg3l --bid-ask-spread 0.02
@@ -120,12 +120,24 @@ pm2 start ecosystem.config.js
 
 # Start specific strategy
 pm2 start ecosystem.config.js --only etf-stg3l
+pm2 start ecosystem.config.js --only etf-stg3s
+pm2 start ecosystem.config.js --only etf-stg5l
+pm2 start ecosystem.config.js --only etf-stg5s
 
 # Monitor all processes
 pm2 monit
 
 # View logs
 pm2 logs etf-stg3l
+
+# Stop specific strategy
+pm2 stop etf-stg3l
+
+# Restart specific strategy
+pm2 restart etf-stg3l
+
+# View all processes
+pm2 list
 ```
 
 #### Low-Frequency Strategy Monitoring
@@ -153,9 +165,6 @@ python run_net_value.py --strategy stg3l  # 3x long
 python run_net_value.py --strategy stg3s  # 3x short
 python run_net_value.py --strategy stg5l  # 5x long
 python run_net_value.py --strategy stg5s  # 5x short
-
-# Test improved net value calculator features
-python test_improved_net_value.py
 
 # Run specific components (legacy)
 python hedging_stg3l.py    # Hedging operations
