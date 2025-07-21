@@ -13,6 +13,43 @@ This is a cryptocurrency ETF trading system that integrates with Binance and XT 
 
 ## Development Commands
 
+### Setting Up Development Environment (推荐使用 uv)
+
+#### 使用 uv 快速设置
+```bash
+# 安装 uv (如果还没有安装)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 运行设置脚本
+./scripts/setup_uv.sh
+
+# 激活虚拟环境
+source .venv/bin/activate  # Linux/macOS
+.venv\Scripts\activate     # Windows
+```
+
+#### uv 常用命令
+```bash
+# 创建虚拟环境
+uv venv --python 3.11
+
+# 安装项目和依赖
+uv pip install -e .
+uv pip install -e ".[dev]"
+
+# 添加新依赖
+uv pip install package-name
+
+# 同步依赖
+uv pip sync
+
+# 查看已安装的包
+uv pip list
+
+# 导出依赖
+uv pip freeze > requirements.txt
+```
+
 ### Running Tests
 ```bash
 # Run all tests with parallel execution
@@ -40,7 +77,7 @@ pyright
 pre-commit run --all-files
 ```
 
-### Building and Installation
+### Building and Installation (传统方式)
 ```bash
 # Install in development mode
 pip install -e .
@@ -65,9 +102,39 @@ python run_etf.py --strategy stg5s  # 5x short strategy
 ./scripts/run_stg5l.sh  # 5x long
 ./scripts/run_stg5s.sh  # 5x short
 
+# Using complete startup scripts (includes all dependencies)
+./run_stg3l_complete.sh  # 3x long with Redis check, net value service
+./run_stg3s_complete.sh  # 3x short with full environment setup
+./run_stg5l_complete.sh  # 5x long with complete initialization
+./run_stg5s_complete.sh  # 5x short with all services
+
 # Override parameters
 python run_etf.py --strategy stg3l --bid-ask-spread 0.02
 python run_etf.py --strategy stg5s --env qa
+```
+
+#### Production Deployment (PM2)
+```bash
+# Start all strategies using PM2
+pm2 start ecosystem.config.js
+
+# Start specific strategy
+pm2 start ecosystem.config.js --only etf-stg3l
+
+# Monitor all processes
+pm2 monit
+
+# View logs
+pm2 logs etf-stg3l
+```
+
+#### Low-Frequency Strategy Monitoring
+```bash
+# Run monitoring script
+python monitor_low_freq.py
+
+# Run tests for low-frequency parameters
+pytest tests/test_low_frequency_strategy.py -v
 ```
 
 #### Legacy Method (Original scripts archived in `legacy/`)
@@ -81,11 +148,11 @@ python legacy/run_etf_stg5s.py
 
 #### Other Components
 ```bash
-# Using PM2 (production)
-pm2 start run.sh
+# Run net value calculation (unified)
+python run_net_value.py
 
 # Run specific components
-python net_value_stg3l.py  # Net value calculation
+python net_value_stg3l.py  # Net value calculation (legacy)
 python hedging_stg3l.py    # Hedging operations
 ```
 
@@ -118,6 +185,7 @@ python hedging_stg3l.py    # Hedging operations
 2. **Order Flow**: Strategy → Order Manager → Exchange API → Confirmation
 3. **Risk Management**: Position Monitor → Risk Module → Order Constraints
 4. **PnL Tracking**: Trade Events → PnL Calculator → Monitoring Bot
+5. **Net Value Storage**: Real-time calculation → Redis only (no file backup)
 
 ### Key Design Patterns
 
@@ -147,3 +215,52 @@ python hedging_stg3l.py    # Hedging operations
 3. **Order State Management**: Orders are tracked locally and reconciled with exchange state
 4. **Risk Parameters**: Each strategy has hardcoded risk limits that should be reviewed before deployment
 5. **Redis Dependency**: The system requires Redis running on localhost:6379 for operation
+
+## Low-Frequency Trading Strategy
+
+### Overview
+
+The system has been optimized for low-frequency trading to reduce costs and improve stability:
+
+- **Trading Intervals**: 10-15 seconds between market maker updates (previously 1-5 seconds)
+- **Washing Intervals**: 30-60 seconds between wash trades (previously 1-5 seconds)
+- **Bid-Ask Spreads**: Adjusted based on leverage:
+  - 3x leverage: 0.8-1.5% spread
+  - 5x leverage: 1.5-5% spread
+
+### Strategy Parameters
+
+All strategies are configured in `config/strategies.yaml` with the following key parameters:
+
+```yaml
+strategy_name:
+  symbol: "BTCUSDT"
+  sleep_interval: 10-15  # seconds between updates
+  washing_interval: 30-60  # seconds between wash trades
+  bid_ask_spread: 0.008-0.05  # varies by leverage
+  max_position: 100000  # maximum position size
+  stop_loss: 0.02-0.05  # varies by leverage
+```
+
+### Monitoring and Alerts
+
+The `monitor_low_freq.py` script monitors key metrics:
+
+- **Washing Frequency**: 60-120 washes per hour expected
+- **Real Trade Ratio**: 5-30% of total trades should be real
+- **Net Value Deviation**: Alert if >5% deviation from expected
+- **Performance Metrics**: Track order placement frequency and success rate
+
+### Testing
+
+Run low-frequency strategy tests:
+
+```bash
+pytest tests/test_low_frequency_strategy.py -v
+```
+
+This validates:
+- Time interval parameters are within expected ranges
+- Bid-ask spreads are appropriate for leverage levels
+- Risk parameters are correctly configured
+- Order lifetime matches low-frequency operation

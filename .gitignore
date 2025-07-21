@@ -71,6 +71,11 @@ include/
 lib/
 lib64/
 pip-selfcheck.json
+.venv/
+
+# uv 相关
+.uv/
+uv.lock
 
 # Jupyter Notebook
 .ipynb_checkpoints

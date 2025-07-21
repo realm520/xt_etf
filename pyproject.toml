@@ -1,3 +1,40 @@
+[project]
+name = "xt-etf"
+version = "1.0.0"
+description = "XT ETF 加密货币交易系统"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "aiohttp",
+    "dateparser",
+    "pycryptodome",
+    "requests",
+    "websockets",
+    "websockets_proxy; python_version >= '3.8'",
+    "redis",
+    "pyyaml",
+    "pandas",
+    "numpy",
+    "loguru",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-asyncio",
+    "pytest-timeout",
+    "pytest-xdist",
+    "pytest-cov",
+    "ruff",
+    "pyright",
+    "pre-commit",
+    "tox",
+]
+
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [tool.ruff]
 preview = true
 lint.ignore = ["F722","F841","F821","E402","E501","E902","E713","E741","E714", "E275","E721","E266", "E261"]
@@ -6,3 +43,21 @@ lint.ignore = ["F722","F841","F821","E402","E501","E902","E713","E741","E714", "
 timeout = 10
 timeout_method = "thread"
 addopts = "-n 10"
+
+[tool.uv]
+# Python 版本管理
+managed = true
+python-preference = "system"
+
+# 开发依赖（用于 uv sync）
+dev-dependencies = [
+    "pytest>=6.0",
+    "pytest-asyncio",
+    "pytest-timeout",
+    "pytest-xdist",
+    "pytest-cov",
+    "ruff",
+    "pyright",
+    "pre-commit",
+    "tox",
+]
