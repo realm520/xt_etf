@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 from copy import deepcopy
 import asyncio
 from typing import Optional, Dict, Any
+from etf.alert import send_alert, AlertLevel
 
 # 导入订单记录器
 try:
@@ -144,17 +145,35 @@ class OrderManager:
         )
         # if order_data["symbol"]
         # self.open_orders = {}
-        response = self.client.order(
-            symbol=order.symbol,
-            side=order.side,
-            type=order.type,
-            biz_type=order.bizType,
-            time_in_force=order.timeInForce,
-            client_order_id=order.clientOrderId,
-            price=order.price,
-            quantity=order.quantity,
-            quote_qty=order.quoteQty,
-        )
+        try:
+            response = self.client.order(
+                symbol=order.symbol,
+                side=order.side,
+                type=order.type,
+                biz_type=order.bizType,
+                time_in_force=order.timeInForce,
+                client_order_id=order.clientOrderId,
+                price=order.price,
+                quantity=order.quantity,
+                quote_qty=order.quoteQty,
+            )
+        except Exception as e:
+            # 发送 API 错误告警
+            asyncio.create_task(send_alert(
+                "api_error",
+                {
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "price": order.price,
+                    "quantity": order.quantity,
+                    "operation": "add_order"
+                },
+                strategy_name=self.strategy_name
+            ))
+            logging.error(f"下单失败: {e}")
+            raise
 
         # 记录订单到数据库
         if response and self.order_recorder:

@@ -1,0 +1,179 @@
+# 告警系统配置文件
+# 支持环境变量替换: ${VAR_NAME}
+
+lark:
+  # Webhook 地址（从环境变量读取，保护敏感信息）
+  webhooks:
+    default: "${LARK_WEBHOOK_URL}"
+    critical: "${LARK_CRITICAL_WEBHOOK_URL}"
+  
+  # 限流配置
+  rate_limit:
+    max_per_minute: 10      # 每分钟最多发送告警数
+    max_per_hour: 100       # 每小时最多发送告警数
+  
+  # 聚合配置
+  aggregation:
+    window_seconds: 60      # 聚合窗口（秒）
+    enabled: true          # 是否启用聚合
+
+# 告警规则配置
+alert_rules:
+  # 净值异常
+  net_value_spike:
+    description: "净值异常波动"
+    conditions:
+      - field: "net_value_change_rate"
+        operator: ">"
+        threshold: 0.05    # 5% 变化
+    level: "ERROR"
+    cooldown: 300          # 5分钟冷却时间
+    aggregate: true
+    aggregate_key: "net_value_spike_{symbol}"
+  
+  # 净值大幅下跌（需要立即处理）
+  net_value_crash:
+    description: "净值大幅下跌"
+    conditions:
+      - field: "net_value_change_rate"
+        operator: "<"
+        threshold: -0.1    # -10% 变化
+    level: "CRITICAL"
+    cooldown: 0            # 立即告警，无冷却
+    aggregate: false
+  
+  # 持仓超限
+  position_overlimit:
+    description: "持仓超过限制"
+    conditions:
+      - field: "position_ratio"
+        operator: ">"
+        threshold: 1.0     # 100% 持仓限制
+    level: "CRITICAL"
+    cooldown: 60           # 1分钟冷却
+    aggregate: false
+  
+  # API 调用错误
+  api_error:
+    description: "API 调用失败"
+    conditions:
+      - field: "error_type"
+        operator: "in"
+        values: ["XtHttpError", "XtBusinessError", "BinanceAPIException"]
+    level: "WARNING"
+    cooldown: 600          # 10分钟冷却
+    aggregate: true
+    aggregate_key: "api_error_{error_type}"
+  
+  # 连接断开
+  connection_lost:
+    description: "交易所连接断开"
+    conditions:
+      - field: "connection_status"
+        operator: "=="
+        value: "disconnected"
+    level: "ERROR"
+    cooldown: 300          # 5分钟冷却
+    aggregate: false
+  
+  # 止损触发
+  stop_loss_triggered:
+    description: "止损被触发"
+    conditions:
+      - field: "event_type"
+        operator: "=="
+        value: "stop_loss"
+    level: "CRITICAL"
+    cooldown: 0            # 立即告警
+    aggregate: false
+  
+  # 订单失败率高
+  high_order_failure_rate:
+    description: "订单失败率过高"
+    conditions:
+      - field: "order_failure_rate"
+        operator: ">"
+        threshold: 0.1     # 10% 失败率
+    level: "WARNING"
+    cooldown: 1800         # 30分钟冷却
+    aggregate: true
+    aggregate_key: "order_failure_{symbol}"
+  
+  # 资金使用率过高
+  high_capital_usage:
+    description: "资金使用率过高"
+    conditions:
+      - field: "capital_usage_rate"
+        operator: ">"
+        threshold: 0.8     # 80% 使用率
+    level: "WARNING"
+    cooldown: 3600         # 1小时冷却
+    aggregate: false
+  
+  # 程序启动/停止
+  program_lifecycle:
+    description: "程序生命周期事件"
+    conditions:
+      - field: "event_type"
+        operator: "in"
+        values: ["start", "stop", "restart"]
+    level: "INFO"
+    cooldown: 0            # 无冷却
+    aggregate: false
+  
+  # 净值恢复
+  net_value_recovery:
+    description: "净值断线恢复"
+    conditions:
+      - field: "event_type"
+        operator: "=="
+        value: "net_value_recovery"
+    level: "INFO"
+    cooldown: 0            # 无冷却
+    aggregate: false
+  
+  # 异常价格
+  abnormal_price:
+    description: "检测到异常价格"
+    conditions:
+      - field: "price_change_rate"
+        operator: ">"
+        threshold: 0.1     # 10% 价格变化
+    level: "WARNING"
+    cooldown: 300          # 5分钟冷却
+    aggregate: true
+    aggregate_key: "abnormal_price_{symbol}"
+
+# 告警级别配置
+alert_levels:
+  INFO:
+    send_to_webhook: "default"
+    include_in_summary: true
+  
+  WARNING:
+    send_to_webhook: "default"
+    include_in_summary: true
+    
+  ERROR:
+    send_to_webhook: "default"
+    include_in_summary: true
+    notify_operators: true
+    
+  CRITICAL:
+    send_to_webhook: "critical"
+    include_in_summary: true
+    notify_operators: true
+    require_acknowledgment: true
+
+# 告警汇总配置
+alert_summary:
+  enabled: true
+  schedule: "0 8,20 * * *"   # 每天8点和20点发送汇总
+  include_levels: ["WARNING", "ERROR", "CRITICAL"]
+  retention_hours: 24        # 保留24小时的告警记录
+
+# 操作员通知配置（可扩展为短信、邮件等）
+operators:
+  - name: "运维负责人"
+    notify_levels: ["ERROR", "CRITICAL"]
+    channels: ["lark"]

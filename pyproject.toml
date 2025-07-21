@@ -16,6 +16,7 @@ dependencies = [
     "pandas",
     "numpy",
     "loguru",
+    "superclaude>=3.0.0.1",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +35,13 @@ dev = [
 [build-system]
 requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["etf", "binance"]
+
+[tool.setuptools.package-data]
+etf = ["*.yaml", "*.json"]
+binance = ["*.json"]
 
 [tool.ruff]
 preview = true

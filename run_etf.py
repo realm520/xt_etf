@@ -4,6 +4,7 @@ from etf.market_making import MarketMaker
 from etf.order_manager import OrderManager
 from etf.xt import Spot
 from hedging import Hedge
+from etf.alert import send_direct_alert, AlertLevel, get_alert_manager
 import json
 import time
 import logging
@@ -13,6 +14,7 @@ import pandas as pd
 import argparse
 import yaml
 import os
+import asyncio
 
 logging.shutdown()
 logging.basicConfig(
@@ -258,6 +260,51 @@ def get_parser():
     return parser
 
 
+async def send_startup_alert(strategy_name: str, config: dict):
+    """发送程序启动告警"""
+    await send_direct_alert(
+        title=f"策略启动: {strategy_name}",
+        content=f"ETF 策略已启动\n环境: {config.get('env', 'unknown')}\n交易对: {config.get('symbol', 'unknown')}",
+        level=AlertLevel.INFO,
+        strategy_name=strategy_name,
+        details={
+            "event_type": "start",
+            "environment": config.get("env"),
+            "symbol": config.get("symbol"),
+            "leverage": config.get("leverage", "unknown"),
+            "hedging_enabled": config.get("Enable_hedging", False),
+            "wash_trading_enabled": config.get("Enable_wash_trading", False),
+            "risk_controller_enabled": config.get("Enable_risk_controller", False)
+        }
+    )
+
+
+async def send_shutdown_alert(strategy_name: str, config: dict, reason: str = "正常退出"):
+    """发送程序停止告警"""
+    await send_direct_alert(
+        title=f"策略停止: {strategy_name}",
+        content=f"ETF 策略已停止\n原因: {reason}\n交易对: {config.get('symbol', 'unknown')}",
+        level=AlertLevel.INFO,
+        strategy_name=strategy_name,
+        details={
+            "event_type": "stop",
+            "reason": reason,
+            "symbol": config.get("symbol")
+        }
+    )
+
+
+def run_async_alert(coro):
+    """在新的事件循环中运行异步告警"""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(coro)
+        loop.close()
+    except Exception as e:
+        logging.error(f"发送告警失败: {e}")
+
+
 if __name__ == "__main__":
     parser = get_parser()
     args = parser.parse_args()
@@ -372,13 +419,25 @@ if __name__ == "__main__":
         )
 
     elif config["env"] == "prod":
-        with open(config["apikey"], "r", encoding="utf8") as input:
-            apikey = json.load(input)
+        # 使用安全的 API 密钥加载器
+        from etf.utils.crypto import load_api_keys
+        
+        try:
+            apikey = load_api_keys(config["apikey"])
             spot = Spot(
                 host="https://sapi.xt.com",
                 access_key=apikey["xt_" + prefix]["access_key"],
                 secret_key=apikey["xt_" + prefix]["secret_key"],
             )
+        except FileNotFoundError:
+            # 向后兼容：如果都不存在，使用原始方式
+            with open(config["apikey"], "r", encoding="utf8") as input:
+                apikey = json.load(input)
+                spot = Spot(
+                    host="https://sapi.xt.com",
+                    access_key=apikey["xt_" + prefix]["access_key"],
+                    secret_key=apikey["xt_" + prefix]["secret_key"],
+                )
 
     # risk related
     risk_params = {
@@ -388,8 +447,13 @@ if __name__ == "__main__":
         "base_bid_volume": 50,
         "orderbook_threshold": [0.8, 0.5, 0.2],
     }
+    
+    # 添加止损配置（如果在策略配置中存在）
+    if "stop_loss" in strategy_config:
+        risk_params["stop_loss"] = strategy_config["stop_loss"]
+    
     logging.info("run RiskController")
-    risk_controller = RiskController(spot, risk_params)
+    risk_controller = RiskController(spot, risk_params, strategy_name=strategy_name)
     if config["Enable_risk_controller"]:
         risk_controller.risk_monitor(symbol=config["symbol"])
 
@@ -397,6 +461,36 @@ if __name__ == "__main__":
     # 传递策略名称给 OrderManager
     strategy_name = config.get("strategy_name", config.get("prefix", "unknown"))
     order_manager = OrderManager(spot, strategy_name=strategy_name)
+    
+    # 发送启动告警
+    run_async_alert(send_startup_alert(strategy_name, config))
+    
+    # 注册退出处理函数
+    def cleanup():
+        """清理函数，在程序退出时执行"""
+        try:
+            # 发送停止告警
+            run_async_alert(send_shutdown_alert(strategy_name, config))
+            
+            # 撤销所有挂单
+            if config.get("Exit_with_cancel_all_open_orders", True):
+                try:
+                    order_manager.cancel_all_open_orders(config["symbol"])
+                    logging.info("已撤销所有挂单")
+                except Exception as e:
+                    logging.error(f"撤销挂单失败: {e}")
+                    
+            # 关闭告警管理器
+            alert_manager = get_alert_manager()
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(alert_manager.close())
+            loop.close()
+            
+        except Exception as e:
+            logging.error(f"清理过程出错: {e}")
+            
+    atexit.register(cleanup)
 
     # 初始化余额（在单独的策略文件中有，但在原始 run_etf.py 中被注释）
     # 只有在使用策略模式时才启用，以保持向后兼容

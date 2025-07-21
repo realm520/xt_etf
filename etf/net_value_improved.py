@@ -14,12 +14,14 @@ Date:   2024/12/19
 import json
 import time
 import redis
+import asyncio
 from typing import Dict, Optional, List, Tuple
 from loguru import logger
 from datetime import datetime, timedelta
 
-from etf.exchange.xt import Spot
+from etf.xt import Spot
 from etf.utils.ds import Queue
+from etf.alert import send_alert, AlertLevel
 
 
 class ImprovedNetValue:
@@ -187,6 +189,22 @@ class ImprovedNetValue:
                 "missed_intervals": missed_intervals,
                 "timestamp": time.time(),
             })
+            
+            # 发送恢复告警
+            asyncio.create_task(send_alert(
+                "net_value_recovery",
+                {
+                    "event_type": "net_value_recovery",
+                    "gap_seconds": gap_seconds,
+                    "missed_intervals": missed_intervals,
+                    "symbol": self.symbol,
+                    "leverage": self.m_lever,
+                    "direction": "做多" if self.long else "做空",
+                    "old_net_value": data["net_value"],
+                    "management_fee_deducted": total_fee_rate * data["net_value"]
+                },
+                strategy_name=f"{self.symbol}{self.m_lever}{'l' if self.long else 's'}"
+            ))
 
         except Exception as e:
             logger.error(f"恢复净值失败: {e}")
@@ -235,6 +253,21 @@ class ImprovedNetValue:
                 "p1": p1,
                 "timestamp": time.time(),
             })
+            
+            # 发送异常价格告警
+            asyncio.create_task(send_alert(
+                "abnormal_price",
+                {
+                    "price_change_rate": abs(v),
+                    "symbol": self.symbol,
+                    "old_price": p0,
+                    "new_price": p1,
+                    "leverage": self.m_lever,
+                    "direction": "做多" if self.long else "做空"
+                },
+                strategy_name=f"{self.symbol}{self.m_lever}{'l' if self.long else 's'}"
+            ))
+            
             v = self.max_single_change if v > 0 else -self.max_single_change
             # 调整p1为限制后的价格，用于后续再平衡计算
             p1 = p0 * (1 + v)
@@ -308,6 +341,10 @@ class ImprovedNetValue:
 
                 # 扣除管理费
                 net_value_after_fee = self.cal_fee(net_value)
+                
+                # 计算净值变化率
+                old_net_value = self.net_value_data["net_value"]
+                net_value_change_rate = (net_value_after_fee - old_net_value) / old_net_value if old_net_value > 0 else 0
 
                 # 更新数据
                 self.net_value_data.update({
@@ -324,8 +361,24 @@ class ImprovedNetValue:
                     f"[{datetime.now().strftime('%H:%M:%S')}] "
                     f"净值更新: {net_value_after_fee:.6f}, "
                     f"价格: {mid_price:.4f}, "
+                    f"变化率: {net_value_change_rate:.4%}, "
                     f"更新次数: {self.net_value_data['update_count']}"
                 )
+                
+                # 检查净值异常
+                if abs(net_value_change_rate) > 0.05:  # 5% 变化
+                    asyncio.create_task(send_alert(
+                        "net_value_spike" if net_value_change_rate > 0 else "net_value_crash",
+                        {
+                            "net_value_change_rate": net_value_change_rate,
+                            "symbol": self.symbol,
+                            "old_net_value": old_net_value,
+                            "new_net_value": net_value_after_fee,
+                            "leverage": self.m_lever,
+                            "direction": "做多" if self.long else "做空"
+                        },
+                        strategy_name=f"{self.symbol}{self.m_lever}{'l' if self.long else 's'}"
+                    ))
 
                 # 等待下一个周期
                 time.sleep(self.time_gap_second)

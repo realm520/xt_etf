@@ -46,6 +46,15 @@ strategies:
     rebalance_threshold: 0.05 # 再平衡阈值
     max_single_change: 0.10  # 最大单次变化率限制
     max_restart_gap: 300     # 最大重启间隔（秒）
+    
+    # 止损配置
+    stop_loss:
+      enabled: true          # 是否启用止损
+      fixed_threshold: -0.02 # 固定止损阈值 -2%
+      trailing_stop: 0.01    # 移动止损 1%
+      time_stop: 24          # 时间止损（小时）
+      cooldown: 60           # 止损后冷却时间（分钟）
+      enable_partial_close: true  # 是否启用部分平仓
 
   stg3s:
     # 基础配置
@@ -91,6 +100,15 @@ strategies:
     rebalance_threshold: 0.05 # 再平衡阈值
     max_single_change: 0.10  # 最大单次变化率限制
     max_restart_gap: 300     # 最大重启间隔（秒）
+    
+    # 止损配置
+    stop_loss:
+      enabled: true          # 是否启用止损
+      fixed_threshold: -0.02 # 固定止损阈值 -2%
+      trailing_stop: 0.01    # 移动止损 1%
+      time_stop: 24          # 时间止损（小时）
+      cooldown: 60           # 止损后冷却时间（分钟）
+      enable_partial_close: true  # 是否启用部分平仓
 
   stg5l:
     # 基础配置
@@ -136,6 +154,15 @@ strategies:
     rebalance_threshold: 0.05 # 再平衡阈值
     max_single_change: 0.10  # 最大单次变化率限制
     max_restart_gap: 300     # 最大重启间隔（秒）
+    
+    # 止损配置
+    stop_loss:
+      enabled: true          # 是否启用止损
+      fixed_threshold: -0.02 # 固定止损阈值 -2%
+      trailing_stop: 0.01    # 移动止损 1%
+      time_stop: 24          # 时间止损（小时）
+      cooldown: 60           # 止损后冷却时间（分钟）
+      enable_partial_close: true  # 是否启用部分平仓
 
   stg5s:
     # 基础配置
@@ -181,3 +208,12 @@ strategies:
     rebalance_threshold: 0.05 # 再平衡阈值
     max_single_change: 0.10  # 最大单次变化率限制
     max_restart_gap: 300     # 最大重启间隔（秒）
+    
+    # 止损配置
+    stop_loss:
+      enabled: true          # 是否启用止损
+      fixed_threshold: -0.02 # 固定止损阈值 -2%
+      trailing_stop: 0.01    # 移动止损 1%
+      time_stop: 24          # 时间止损（小时）
+      cooldown: 60           # 止损后冷却时间（分钟）
+      enable_partial_close: true  # 是否启用部分平仓

@@ -13,7 +13,7 @@ from typing import List, Dict, Tuple, Optional
 from datetime import datetime, timedelta
 from loguru import logger
 
-from etf.exchange.xt import Spot
+from etf.xt import Spot
 
 
 class NetValueRecovery:

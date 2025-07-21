@@ -1,11 +1,14 @@
 import logging
 import math
-from typing import List, Dict
+from typing import List, Dict, Optional
 import time
 import numpy as np
+import asyncio
+
+from etf.risk.stop_loss import StopLossManager, StopLossAction
 
 class RiskController:
-    def __init__(self, client, risk_params):
+    def __init__(self, client, risk_params, strategy_name: str = "unknown"):
         """
         Initializes the RiskController.
         :param exchange_api: Instance of the exchange API interface.
@@ -19,6 +22,20 @@ class RiskController:
         self.risk_level = 3
         self.midprices = []
         self.depth = None
+        self.strategy_name = strategy_name
+        
+        # 初始化止损管理器（如果配置中启用）
+        self.stop_loss_manager: Optional[StopLossManager] = None
+        if risk_params.get("stop_loss", {}).get("enabled", False):
+            stop_loss_config = risk_params["stop_loss"]
+            self.stop_loss_manager = StopLossManager(
+                strategy_name=strategy_name,
+                fixed_threshold=stop_loss_config.get("fixed_threshold", -0.02),
+                trailing_stop=stop_loss_config.get("trailing_stop", 0.01),
+                time_stop_hours=stop_loss_config.get("time_stop", 24),
+                cooldown_minutes=stop_loss_config.get("cooldown", 60),
+                enable_partial_close=stop_loss_config.get("enable_partial_close", True)
+            )
 
     def get_mid_price(self, depth) -> float:
         """Calculates the mid price from the order book."""
@@ -193,3 +210,57 @@ class RiskController:
             self.risk_level = 2
         else:
             self.risk_level = 3
+            
+    def update_position_for_stop_loss(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        entry_price: float,
+        current_price: float
+    ):
+        """更新止损管理器的持仓信息"""
+        if self.stop_loss_manager:
+            self.stop_loss_manager.update_position(
+                symbol=symbol,
+                side=side,
+                amount=amount,
+                entry_price=entry_price,
+                current_price=current_price
+            )
+            
+    async def check_stop_loss(self, symbol: str) -> Optional[Dict]:
+        """
+        检查止损条件
+        
+        Returns:
+            如果触发止损，返回止损结果；否则返回 None
+        """
+        if not self.stop_loss_manager:
+            return None
+            
+        result = await self.stop_loss_manager.check_stop_loss(symbol)
+        
+        if result.triggered:
+            return {
+                "action": result.action,
+                "reason": result.reason,
+                "loss_rate": result.loss_rate,
+                "position_to_close": result.position_to_close
+            }
+            
+        return None
+        
+    def is_stop_loss_active(self) -> bool:
+        """检查止损是否处于活动状态（非冷却期）"""
+        if not self.stop_loss_manager:
+            return True  # 没有止损管理器，不影响交易
+            
+        return not self.stop_loss_manager.is_in_cooldown
+        
+    def get_stop_loss_summary(self) -> Optional[Dict]:
+        """获取止损汇总信息"""
+        if not self.stop_loss_manager:
+            return None
+            
+        return self.stop_loss_manager.get_stop_loss_summary()
