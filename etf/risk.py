@@ -6,6 +6,7 @@ import numpy as np
 import asyncio
 
 from etf.risk.stop_loss import StopLossManager, StopLossAction
+from etf.utils.common import get_mid_price, calculate_price_change_percentage
 
 class RiskController:
     def __init__(self, client, risk_params, strategy_name: str = "unknown"):
@@ -37,15 +38,9 @@ class RiskController:
                 enable_partial_close=stop_loss_config.get("enable_partial_close", True)
             )
 
-    def get_mid_price(self, depth) -> float:
+    def get_mid_price_from_depth(self, depth) -> float:
         """Calculates the mid price from the order book."""
-        # depth = self.client.get_depth(symbol=symbol, limit=50)
-        
-        best_bid = float(depth['bids'][0][0])
-        best_ask = float(depth['asks'][0][0])
-        # logging.info(f"depth:{depth}")
-        # logging.info(f"best bid: {best_bid}, best ask: {best_ask}")
-        return (best_bid + best_ask) / 2
+        return get_mid_price(depth)
 
     def get_market_price(self, symbol):
         '''ticker
@@ -193,7 +188,7 @@ class RiskController:
         :return: The current risk level.
         """
         depth_data = self.get_depth_data(symbol)
-        mid_price = self.get_mid_price(depth_data)
+        mid_price = self.get_mid_price_from_depth(depth_data)
         market_price = self.get_market_price(symbol)
         # depth_data = self.get_depth_data(symbol)
 

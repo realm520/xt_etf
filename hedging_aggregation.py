@@ -5,6 +5,7 @@ import math
 import logging
 import json
 import pandas as pd
+from etf.utils.common import get_mid_price
 from pnl_bot import LarkBot
 from datetime import datetime
 import redis
@@ -57,13 +58,7 @@ class XtClient:
         # logging.info(f"depth {depth}")
         return depth
 
-    def get_mid_price(self, depth) -> float:
-        """Calculates the mid price from the order book."""
-
-        best_bid = float(depth["bids"][0][0])
-        best_ask = float(depth["asks"][0][0])
-
-        return (best_bid + best_ask) / 2
+    # 使用共同的 get_mid_price 函数来替代重复代码
 
     def get_position3(self):
         logging.info("get_position3")
@@ -79,7 +74,7 @@ class XtClient:
                 logging.info(e1)
                 try:
                     depth = self.get_depth_data(symbol)
-                    mid_price = self.get_mid_price(depth)
+                    mid_price = get_mid_price(depth)
                 except Exception as e2:
                     logging.info(e2)
                     return False

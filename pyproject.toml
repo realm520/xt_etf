@@ -50,7 +50,55 @@ lint.ignore = ["F722","F841","F821","E402","E501","E902","E713","E741","E714", "
 [tool.pytest.ini_options]
 timeout = 10
 timeout_method = "thread"
-addopts = "-n 10"
+addopts = "-n 10 --strict-markers --strict-config"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*", "*Tests"]
+python_functions = ["test_*"]
+markers = [
+    "slow: marks tests as slow (may take more than 1 second)",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests", 
+    "redis_required: marks tests that require Redis",
+    "performance: marks tests as performance benchmarks",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["etf", "binance"]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "*/__pycache__/*",
+    "*/conftest.py",
+    "*/setup.py",
+    "*/venv/*",
+    "*/.venv/*",
+]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+ignore_errors = true
+show_missing = true
+precision = 2
+
+[tool.coverage.html]
+directory = "htmlcov"
 
 [tool.uv]
 # Python 版本管理

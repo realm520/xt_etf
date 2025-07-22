@@ -45,6 +45,9 @@ class Spot:
         # self.anonymous = not(account and account_id and access_key and secret_key)
         self.anonymous = not (access_key and secret_key)
         self.timeout = 10  # 默认超时时间
+        
+        # 连接健康检查相关
+        self.connection_health_checker = None
         self.headers = {
             "Content-type": "application/x-www-form-urlencoded",
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0'
@@ -152,6 +155,10 @@ class Spot:
         :return: 1662435658062  # datetime.datetime.fromtimestamp(1662435658062/1000)
         """
         return int(self.req_get("/v4/public/time")['result']['serverTime'])
+    
+    def get_server_time(self) -> int:
+        """获取服务器时间 - get_time的别名，用于连接健康检查"""
+        return self.get_time()
 
     def get_symbol_config(self, symbol: str = None, symbols: list = None) -> dict:
         """

@@ -1,4 +1,15 @@
 from etf.orderbook import get_orderbook
+from etf.utils.optimization import (
+    optimize_order_matching, 
+    performance_monitor, 
+    async_order_processor,
+    optimize_batch_operations
+)
+from etf.utils.constants import (
+    DEFAULT_REDIS_HOST, DEFAULT_REDIS_PORT, DEFAULT_REDIS_DB,
+    DEFAULT_BATCH_SIZE, DEFAULT_BATCH_ID, DEFAULT_CLIENT_ORDER_ID,
+    SIDE_BUY, SIDE_SELL, ORDER_TYPE_LIMIT, TIME_IN_FORCE_GTC, BIZ_TYPE_SPOT
+)
 import time
 import numpy as np
 import logging
@@ -15,12 +26,12 @@ class MarketMaker:
         self.order_manager = order_manager
         self.best_sell = 0
         self.best_buy = 0
-        self.r = redis.Redis(host="localhost", port=6379, db=0)
+        self.r = redis.Redis(host=DEFAULT_REDIS_HOST, port=DEFAULT_REDIS_PORT, db=DEFAULT_REDIS_DB)
 
     def make_orders(
         self,
         symbol=None,
-        clientOrderId="16559590087220001",
+        clientOrderId=DEFAULT_CLIENT_ORDER_ID,
         netvalue=1.0,
         env="qa",
         ordermanager=None,
@@ -36,25 +47,24 @@ class MarketMaker:
                 order_data = {
                     "symbol": symbol,
                     "clientOrderId": self.order_manager.create_temp_id(),
-                    "side": "SELL" if fake_order["direction"] == "ask" else "BUY",
-                    "type": "LIMIT",
-                    "timeInForce": "GTC",
-                    "bizType": "SPOT",
+                    "side": SIDE_SELL if fake_order["direction"] == "ask" else SIDE_BUY,
+                    "type": ORDER_TYPE_LIMIT,
+                    "timeInForce": TIME_IN_FORCE_GTC,
+                    "bizType": BIZ_TYPE_SPOT,
                     "price": fake_order["price"],
                     "quantity": fake_order["amount"],
                     "quoteQty": None,
                 }
                 fake_data.append(order_data)
 
-            res = self.order_manager.add_orders_batch(fake_data, batch_id=51232)
+            res = self.order_manager.add_orders_batch(fake_data, batch_id=DEFAULT_BATCH_ID)
 
-            # logging.info(f"make orders {res}")         #self.order_manager.write_orders()
 
     def place_orders(
         self,
         config,
         symbol="btc5l_usdt",
-        clientOrderId="16559590087220001",
+        clientOrderId=DEFAULT_CLIENT_ORDER_ID,
         env="qa",
         ordermanager=None,
         currencies=None,
@@ -127,66 +137,23 @@ class MarketMaker:
                 f"goal ask-1: {batch_order_ask[-1]} goal bid-1: {batch_order_bid[-1]}"
             )
 
-            for goal in goal_orders:
-                goal_min_price = goal["min_price"]
-                goal_max_price = goal["max_price"]
-                goal_amount = goal["amount"]
-
-                valid_market_orders = [
-                    # order for order in current_orders if (goal_min_price <= float(order["price"]) <= goal_max_price) and order["state"] != "PARTIALLY_FILLED"
-                    order
-                    for order in current_orders
-                    if (goal_min_price <= float(order["price"]) <= goal_max_price)
-                ]
-
-                total_market_amount = sum(
-                    round(float(order["origQty"])) for order in valid_market_orders
-                )
-
-                # add orders
-                if total_market_amount < goal_amount:
-                    # logging.info("add order in {goal_min_price} ~ {goal_max_price} qty: {goal_amount - total_market_amount}")
-                    order_data = {
-                        "symbol": symbol,
-                        "clientOrderId": self.order_manager.create_temp_id(),
-                        "side": "SELL" if goal["direction"] == "ask" else "BUY",
-                        "type": "LIMIT",
-                        "timeInForce": "GTC",
-                        "bizType": "SPOT",
-                        "price": goal["price"],
-                        "quantity": goal_amount - total_market_amount,
-                        "quoteQty": None,
-                    }
-                    add_orders.append(order_data)
-
-                # cancle orders
-                elif total_market_amount > goal_amount:
-                    # logging.info("cancel order in {goal_min_price} ~ {goal_max_price}")
-                    excess_amount = total_market_amount - goal_amount
-                    for order in valid_market_orders:
-                        if excess_amount <= 0:
-                            break
-                        cancel_amount = min(
-                            round(float(order["origQty"])), excess_amount
-                        )
-                        if order["state"] != "PARTIALLY_FILLED":
-                            cancel_orders.append(order)
-                        # logging.info(order["price"])
-                        order_data = {
-                            "symbol": symbol,
-                            "clientOrderId": self.order_manager.create_temp_id(),
-                            "side": "SELL" if goal["direction"] == "ask" else "BUY",
-                            "type": "LIMIT",
-                            "timeInForce": "GTC",
-                            "bizType": "SPOT",
-                            "price": goal["price"],
-                            "quantity": goal_amount,
-                            "quoteQty": None,
-                        }
-                        add_orders.append(order_data)
-
-                        excess_amount += goal_amount
-                        excess_amount -= cancel_amount
+            # 使用优化的订单匹配算法，从O(n²)降低到O(n log n)
+            @performance_monitor.time_function("order_matching")
+            def perform_order_matching():
+                # 为goal_orders添加symbol信息
+                for goal in goal_orders:
+                    goal["symbol"] = symbol
+                
+                return optimize_order_matching(current_orders, goal_orders)
+            
+            optimized_add_orders, optimized_cancel_orders = perform_order_matching()
+            
+            # 为每个新订单设置clientOrderId
+            for order_data in optimized_add_orders:
+                order_data["clientOrderId"] = self.order_manager.create_temp_id()
+            
+            add_orders.extend(optimized_add_orders)
+            cancel_orders.extend(optimized_cancel_orders)
 
             # cancle orders which price exceed the limitation
             goal_price_ranges = [
@@ -227,32 +194,34 @@ class MarketMaker:
                 (config["anti_pin_usdt"] / 2) / anti_pin_price_buy,
                 config["prec_amount"],
             )
-            # logging.info()
 
-            order_data = {
+            # 创建反针对卖单
+            sell_order_data = {
                 "symbol": symbol,
                 "clientOrderId": self.order_manager.create_temp_id(),
-                "side": "SELL",
-                "type": "LIMIT",
-                "timeInForce": "GTC",
-                "bizType": "SPOT",
+                "side": SIDE_SELL,
+                "type": ORDER_TYPE_LIMIT,
+                "timeInForce": TIME_IN_FORCE_GTC,
+                "bizType": BIZ_TYPE_SPOT,
                 "price": anti_pin_price_sell,
                 "quantity": anti_pin_amount_sell,
                 "quoteQty": None,
             }
-            add_orders.append(order_data)
-            order_data = {
+            add_orders.append(sell_order_data)
+            
+            # 创建反针对买单
+            buy_order_data = {
                 "symbol": symbol,
                 "clientOrderId": self.order_manager.create_temp_id(),
-                "side": "BUY",
-                "type": "LIMIT",
-                "timeInForce": "GTC",
-                "bizType": "SPOT",
+                "side": SIDE_BUY,
+                "type": ORDER_TYPE_LIMIT,
+                "timeInForce": TIME_IN_FORCE_GTC,
+                "bizType": BIZ_TYPE_SPOT,
                 "price": anti_pin_price_buy,
                 "quantity": anti_pin_amount_buy,
                 "quoteQty": None,
             }
-            add_orders.append(order_data)
+            add_orders.append(buy_order_data)
 
             logging.info(
                 f"anti_pin_price_sell {anti_pin_price_sell} anti_pin_price_buy {anti_pin_price_buy} "
@@ -261,68 +230,69 @@ class MarketMaker:
                 f"anti_pin_amount_sell {anti_pin_amount_sell} anti_pin_amount_buy {anti_pin_amount_buy} "
             )
 
-            # add orders
+            # 使用优化的批量操作处理
+            max_batch_size = DEFAULT_BATCH_SIZE
+            
+            # 优化添加和取消订单的分批策略
+            chunked_add_orders = optimize_batch_operations(
+                add_orders, max_batch_size, "add"
+            ) if add_orders else []
+            
+            chunked_cancel_orders = optimize_batch_operations(
+                cancel_orders, max_batch_size, "cancel"
+            ) if cancel_orders else []
+            
+            # 构建操作队列，优化执行顺序
             operate_orders = []
-            max_batch_size_cancel = 100  # max 300
-            max_batch_size_send = 100  # max 100
-            chunked_add_orders = []
-            chunked_cancel_orders = []
-            if len(add_orders) > 0:
-                chunked_add_orders = [
-                    add_orders[t : t + max_batch_size_send]
-                    for t in range(0, len(add_orders), max_batch_size_send)
-                ]
-            if len(cancel_orders) > 0:
-                # chunked_cancel_orders = []
-                for t in range(0, len(cancel_orders), max_batch_size_cancel):
-                    chunked_cancel_orders.append([
-                        order for order in cancel_orders[t : t + max_batch_size_cancel]
-                    ])
-            if len(chunked_add_orders) > 0 and len(chunked_cancel_orders) > 0:
-                for add_order, cancel_order in zip(
-                    chunked_add_orders, chunked_cancel_orders
-                ):
-                    operate_orders.append((add_order, "add"))
-                    operate_orders.append((cancel_order, "cancel"))
-            elif len(chunked_add_orders) == 0:
-                operate_orders = [(item, "cancel") for item in chunked_cancel_orders]
-            elif len(chunked_cancel_orders) == 0:
-                operate_orders = [(item, "add") for item in chunked_add_orders]
+            max_len = max(len(chunked_add_orders), len(chunked_cancel_orders))
+            
+            for i in range(max_len):
+                # 交替执行添加和取消操作以避免冲突
+                if i < len(chunked_cancel_orders):
+                    operate_orders.append((chunked_cancel_orders[i], "cancel"))
+                if i < len(chunked_add_orders):
+                    operate_orders.append((chunked_add_orders[i], "add"))
 
-            operate_orders.extend(
-                (add_order, "add")
-                for add_order in chunked_add_orders[len(chunked_cancel_orders) :]
-            )
-            operate_orders.extend(
-                (cancel_order, "cancel")
-                for cancel_order in chunked_cancel_orders[len(chunked_add_orders) :]
-            )
+            # 批量处理订单并监控性能
+            @performance_monitor.time_function("batch_order_processing")
+            def execute_order_batches():
+                for orders in operate_orders:
+                    if orders[1] == "add":
+                        try:
+                            res = self.order_manager.add_orders_batch(
+                                orders[0], batch_id=DEFAULT_BATCH_ID
+                            )
+                            logging.debug(f"成功添加 {len(orders[0])} 个订单")
+                        except Exception as e:
+                            logging.error(f"批量添加订单失败: {e}")
+                            pass
 
-            for orders in operate_orders:
-                if orders[1] == "add":
-                    try:
-                        res = self.order_manager.add_orders_batch(
-                            orders[0], batch_id=51232
-                        )
-                    except Exception as e:
-                        logging.info(e)
-                        pass
-
-                elif orders[1] == "cancel":
-                    try:
-                        res = self.order_manager.cancel_orders_batch(orders=orders[0])
-                    except Exception as e:
-                        pass
-            """
-            anti_pin_price_sell = round(self.best_sell * (1 + config["anti_pin_rate"]), config["precision"])
-            anti_pin_price_buy = round(self.best_buy * (1 - config["anti_pin_rate"]), config["precision"])
-
-            anti_pin_amount_sell = round((config["anti_pin_usdt"] / 2) / anti_pin_price_sell, config["prec_amount"])
-            anti_pin_amount_buy = round((config["anti_pin_usdt"] / 2) / anti_pin_price_buy, config["prec_amount"])
-
-            logging.info(f"anti_pin_price_sell {anti_pin_price_sell} anti_pin_price_buy {anti_pin_price_buy} ")
-            self.order_manager.add_order(symbol, side="SELL", type="LIMIT", price=anti_pin_price_sell, quantity=anti_pin_amount_sell)
-            self.order_manager.add_order(symbol, side="BUY", type="LIMIT", price=anti_pin_price_buy, quantity=anti_pin_amount_buy)
-            """
+                    elif orders[1] == "cancel":
+                        try:
+                            res = self.order_manager.cancel_orders_batch(orders=orders[0])
+                            logging.debug(f"成功取消 {len(orders[0])} 个订单")
+                        except Exception as e:
+                            logging.error(f"批量取消订单失败: {e}")
+                            pass
+            
+            execute_order_batches()
         else:
             logging.info(f"[{time.strftime('%H:%M:%S')}] Waiting for net value..")
+    
+    def get_performance_stats(self):
+        """获取性能统计信息"""
+        order_matching_stats = performance_monitor.get_statistics("order_matching")
+        batch_processing_stats = performance_monitor.get_statistics("batch_order_processing")
+        
+        stats = {
+            "order_matching": order_matching_stats,
+            "batch_processing": batch_processing_stats,
+            "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        if order_matching_stats:
+            logging.info(f"订单匹配平均耗时: {order_matching_stats['avg_time']:.4f}s")
+        if batch_processing_stats:
+            logging.info(f"批量处理平均耗时: {batch_processing_stats['avg_time']:.4f}s")
+            
+        return stats

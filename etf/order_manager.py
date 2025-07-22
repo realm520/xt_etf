@@ -6,8 +6,10 @@ import os
 from datetime import datetime, timezone, timedelta
 from copy import deepcopy
 import asyncio
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+from functools import wraps
 from etf.alert import send_alert, AlertLevel
+from etf.utils.common import get_mid_price
 
 # 导入订单记录器
 try:
@@ -17,6 +19,68 @@ try:
 except ImportError:
     ORDER_RECORDER_AVAILABLE = False
     logging.warning("订单记录器未安装，将只使用CSV记录")
+
+
+def retry_on_failure(max_retries: int = 3, delay: float = 1.0, backoff: float = 2.0):
+    """重试装饰器，用于API调用失败时重试"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+                    if attempt < max_retries:
+                        wait_time = delay * (backoff ** attempt)
+                        logging.warning(f"{func.__name__} failed (attempt {attempt + 1}), retrying in {wait_time:.1f}s: {e}")
+                        time.sleep(wait_time)
+                    else:
+                        logging.error(f"{func.__name__} failed after {max_retries + 1} attempts: {e}")
+                        break
+            raise last_exception
+        return wrapper
+    return decorator
+
+
+def handle_api_error(func):
+    """API错误处理装饰器"""
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return func(self, *args, **kwargs)
+        except Exception as e:
+            error_type = type(e).__name__
+            error_msg = str(e)
+            
+            # 记录API错误
+            logging.error(f"API错误 {func.__name__}: {error_type} - {error_msg}")
+            
+            # 发送告警（如果strategy_name存在）
+            if hasattr(self, 'strategy_name'):
+                asyncio.create_task(send_alert(
+                    "api_error",
+                    {
+                        "error_type": error_type,
+                        "error_message": error_msg,
+                        "function": func.__name__,
+                        "operation": "order_management"
+                    },
+                    strategy_name=self.strategy_name
+                ))
+            
+            # 根据错误类型决定是否重试
+            if "rate limit" in error_msg.lower() or "too many requests" in error_msg.lower():
+                logging.warning("遇到限频错误，等待后重试")
+                time.sleep(5)
+                return None
+            elif "network" in error_msg.lower() or "connection" in error_msg.lower():
+                logging.warning("网络错误，将在下次循环重试")
+                return None
+            else:
+                raise
+    return wrapper
 
 
 class Order:
@@ -86,24 +150,62 @@ class OrderManager:
             self._recorder_loop = None
         else:
             self.order_recorder = None
+        
+        # 添加错误统计和健康检查
+        self.api_error_count = 0
+        self.last_successful_operation = time.time()
+        self.consecutive_failures = 0
+        self.circuit_breaker_open = False
+        self.circuit_breaker_reset_time = None
+    
+    def _check_circuit_breaker(self):
+        """检查熔断器状态"""
+        if self.circuit_breaker_open:
+            if self.circuit_breaker_reset_time and time.time() > self.circuit_breaker_reset_time:
+                logging.info("熔断器重置，尝试恢复操作")
+                self.circuit_breaker_open = False
+                self.consecutive_failures = 0
+                return True
+            else:
+                logging.warning("熔断器开启，跳过API操作")
+                return False
+        return True
+    
+    def _record_api_success(self):
+        """记录API成功操作"""
+        self.last_successful_operation = time.time()
+        self.consecutive_failures = 0
+        if self.circuit_breaker_open:
+            logging.info("API操作成功，熔断器状态重置")
+            self.circuit_breaker_open = False
+    
+    def _record_api_failure(self):
+        """记录API失败操作"""
+        self.api_error_count += 1
+        self.consecutive_failures += 1
+        
+        # 如果连续失败次数过多，开启熔断器
+        if self.consecutive_failures >= 5:
+            self.circuit_breaker_open = True
+            self.circuit_breaker_reset_time = time.time() + 60  # 60秒后重置
+            logging.error(f"连续失败{self.consecutive_failures}次，开启熔断器60秒")
 
+    @handle_api_error
     def get_depth_data(self, symbol):
-        depth = self.client.get_depth(symbol)
-        logging.debug(f"depth {depth}")
-        """
-        {'symbol': 'btc5l_usdt', 'timestamp': 1736170681790, 'lastUpdateId': 1736148981744, 'bids': [['0.8822', '0.8896'], ['0.8813', '10.0000'], ['0.7983', '2.0000'], ['0.7975', '11.0000'], ['0.7223', '3.0000'], ['0.7216', '12.0000'], ['0.6536', '3.0000'], ['0.6529', '13.0000'], ['0.5914', '6.0000'], ['0.5908', '12.0000'], ['0.5351', '4.0000'], ['0.5346', '16.0000'], ['0.4842', '44.0000'], ['0.4381', '4.0000'], ['0.4377', '20.0000'], ['0.3964', '5.0000'], ['0.3960', '22.0000'], ['0.3587', '60.0000'], ['0.3245', '6.0000'], ['0.3242', '27.0000'], ['0.2937', '74.0000'], ['0.2657', '80.0000'], ['0.2404', '9.0000'], ['0.2402', '36.0000'], ['0.2176', '49.0000'], ['0.1968', '108.0000'], ['0.1781', '120.0000'], ['0.1612', '134.0000'], ['0.1458', '28.0000'], ['0.1457', '46.0000'], ['0.1320', '81.0000'], ['0.1194', '180.0000'], ['0.1080', '198.0000'], ['0.0978', '220.0000'], ['0.0884', '242.0000'], ['0.0800', '268.0000'], ['0.0724', '296.0000'], ['0.0655', '328.0000'], ['0.0593', '543.0000'], ['0.0536', '600.0000'], ['0.0485', '221.0000']], 'asks': [['1.1328', '18.0000'], ['1.2519', '20.0000'], ['1.3836', '22.0000'], ['1.5291', '24.0000'], ['1.6899', '26.0000'], ['1.8677', '30.0000'], ['2.0641', '32.0000'], ['2.2812', '36.0000'], ['2.5211', '40.0000'], ['2.7862', '44.0000'], ['3.0792', '48.0000'], ['3.4031', '54.0000'], ['3.7610', '58.0000'], ['4.1566', '64.0000'], ['4.5937', '72.0000'], ['5.0768', '80.0000'], ['5.6108', '88.0000'], ['6.2008', '96.0000'], ['6.8530', '106.0000'], ['7.5737', '118.0000'], ['8.3703', '130.0000'], ['9.2506', '144.0000'], ['10.2235', '160.0000'], ['11.2987', '176.0000'], ['12.4870', '194.0000'], ['13.8002', '216.0000'], ['15.2516', '238.0000'], ['16.8557', '264.0000'], ['18.6284', '290.0000'], ['20.5875', '322.0000']]}
-        """
-        self.depth = depth
-        return depth
+        if not self._check_circuit_breaker():
+            return None
+            
+        try:
+            depth = self.client.get_depth(symbol)
+            logging.debug(f"depth {depth}")
+            self.depth = depth
+            self._record_api_success()
+            return depth
+        except Exception as e:
+            self._record_api_failure()
+            raise
 
-    def get_mid_price(self, depth) -> float:
-        """Calculates the mid price from the order book."""
-        # depth = self.client.get_depth(symbol=symbol, limit=50)
-        best_bid = float(depth["bids"][0][0])
-        best_ask = float(depth["asks"][0][0])
-        # logging.info(f"depth:{depth}")
-        # logging.info(f"best bid: {best_bid}, best ask: {best_ask}")
-        return (best_bid + best_ask) / 2
+    # 使用共同的 get_mid_price 函数来替代重复代码
 
     def create_temp_id(self):
         # 创建一个临时 ID
@@ -131,6 +233,7 @@ class OrderManager:
         #         ]
 
     # add orders
+    @handle_api_error
     def add_order(
         self,
         symbol,
@@ -140,11 +243,13 @@ class OrderManager:
         quantity=None,
         is_wash_trading=False,
     ):
+        if not self._check_circuit_breaker():
+            return None
+            
         order = Order(
             symbol=symbol, side=side, type=type, price=price, quantity=quantity
         )
-        # if order_data["symbol"]
-        # self.open_orders = {}
+        
         try:
             response = self.client.order(
                 symbol=order.symbol,
@@ -157,21 +262,10 @@ class OrderManager:
                 quantity=order.quantity,
                 quote_qty=order.quoteQty,
             )
+            self._record_api_success()
         except Exception as e:
-            # 发送 API 错误告警
-            asyncio.create_task(send_alert(
-                "api_error",
-                {
-                    "error_type": type(e).__name__,
-                    "error_message": str(e),
-                    "symbol": order.symbol,
-                    "side": order.side,
-                    "price": order.price,
-                    "quantity": order.quantity,
-                    "operation": "add_order"
-                },
-                strategy_name=self.strategy_name
-            ))
+            self._record_api_failure()
+            # API错误处理装饰器会处理告警发送
             logging.error(f"下单失败: {e}")
             raise
 
@@ -210,10 +304,19 @@ class OrderManager:
 
         return response
 
+    @handle_api_error
     def add_orders_batch(self, order_data, batch_id=None, is_wash_trading=False):
+        if not self._check_circuit_breaker():
+            return None
+            
         time.sleep(0.1)
 
-        response = self.client.batch_order(order_data, batch_id=batch_id)
+        try:
+            response = self.client.batch_order(order_data, batch_id=batch_id)
+            self._record_api_success()
+        except Exception as e:
+            self._record_api_failure()
+            raise
 
         # 记录批量订单
         if response and response.get("items") and self.order_recorder:
@@ -287,8 +390,17 @@ class OrderManager:
     #     for symbol in self.failed_orders.keys():
     #         for side in self.failed_orders[symbol].keys():
     #             self.failed_orders[symbol][side].sort(key=lambda x: x["price"], reverse=(side == "SELL"))
+    @handle_api_error 
     def reset_open_orders(self, symbol):
-        current_orders = self.client.get_open_orders(symbol=symbol)
+        if not self._check_circuit_breaker():
+            return
+            
+        try:
+            current_orders = self.client.get_open_orders(symbol=symbol)
+            self._record_api_success()
+        except Exception as e:
+            self._record_api_failure()
+            raise
         # logging.info(f"get len(current_orders) open orders!")
         self.open_orders = {}
 
@@ -376,12 +488,22 @@ class OrderManager:
         response = self.cancel_orders_batch(order_ids=order_ids)
         return response
 
+    @handle_api_error
     def cancel_all_open_orders(self, symbol=None, biz_type="SPOT", side=None):
-        response = self.client.cancel_open_orders(
-            symbol=symbol, biz_type=biz_type, side=side
-        )
-        if response:
-            self.open_orders = {}
+        if not self._check_circuit_breaker():
+            return None
+            
+        try:
+            response = self.client.cancel_open_orders(
+                symbol=symbol, biz_type=biz_type, side=side
+            )
+            self._record_api_success()
+            if response:
+                self.open_orders = {}
+            return response
+        except Exception as e:
+            self._record_api_failure()
+            raise
 
     def write_orders2(self):
         """
@@ -562,7 +684,7 @@ class OrderManager:
 
     def get_position3(self, symbol, currencies):
         depth = self.get_depth_data(symbol)
-        mid_price = self.get_mid_price(depth)
+        mid_price = get_mid_price(depth)
         info = self.client.balances(currencies)
         for currency in info["assets"]:
             if currency["currency"] == symbol.split("_")[0].lower():
@@ -740,7 +862,7 @@ class OrderManager:
         self.write_history_orders()
 
         depth = self.get_depth_data(symbol)
-        mid_price = self.get_mid_price(depth)
+        mid_price = get_mid_price(depth)
 
         self.amount = self.last_amount + cmu_deltaQty
         self.last_amount = self.amount
@@ -882,7 +1004,7 @@ class OrderManager:
                         #     self.filled_orders.append(res["orderId"])
 
         depth = self.get_depth_data(res["symbol"])
-        mid_price = self.get_mid_price(depth)
+        mid_price = get_mid_price(depth)
 
         self.amount = self.last_amount + cmu_deltaQty
         self.last_amount = self.amount

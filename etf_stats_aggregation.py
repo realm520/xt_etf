@@ -9,6 +9,7 @@ import time
 import logging
 import json
 import pandas as pd
+from etf.utils.common import get_mid_price
 
 logging.shutdown()
 logging.basicConfig(
@@ -51,19 +52,13 @@ class Etf_stats:
         logging.debug(f"depth {depth}")
         return depth
 
-    def get_mid_price(self, depth) -> float:
-        """Calculates the mid price from the order book."""
-
-        best_bid = float(depth["bids"][0][0])
-        best_ask = float(depth["asks"][0][0])
-
-        return (best_bid + best_ask) / 2
+    # 使用共同的 get_mid_price 函数来替代重复代码
 
     def get_position3_xt(self):
         for symbol, value in self.symbols.items():
             try:
                 depth = self.get_depth_data(symbol)
-                mid_price = self.get_mid_price(depth)
+                mid_price = get_mid_price(depth)
             except Exception as e:
                 mid_price = float(
                     open("net_value_" + symbol.split("_")[0], "r", encoding="utf8")

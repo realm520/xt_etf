@@ -3,6 +3,7 @@ from etf.washing import WashController
 from etf.market_making import MarketMaker
 from etf.order_manager import OrderManager
 from etf.xt import Spot
+from etf.stability_monitor import StabilityMonitor
 from hedging import Hedge
 from etf.alert import send_direct_alert, AlertLevel, get_alert_manager
 import json
@@ -29,13 +30,17 @@ class EtfStrategy:
         self.order_manager = order_manager
 
     @staticmethod
-    def run(config, risk_controller, wash_controller, market_maker, depth=None):
+    def run(config, risk_controller, wash_controller, market_maker, stability_monitor=None, depth=None):
         try:
             depth = risk_controller.get_depth_data(config["symbol"])
+            if stability_monitor:
+                stability_monitor.record_api_call(success=True)
         except Exception as e:
             logging.error(e)
             logging.info("error with getting new depth, using history depth")
             depth = risk_controller.depth
+            if stability_monitor:
+                stability_monitor.record_api_call(success=False)
             pass  # using history depth
 
         if config["cancel_all_open_orders"]:
@@ -90,17 +95,29 @@ class EtfStrategy:
         # try:
 
         while True:
-            time.sleep(config.get("sleep_interval", 1))
+            try:
+                time.sleep(config.get("sleep_interval", 1))
 
-            market_maker.place_orders(
-                config,
-                symbol=config["symbol"],
-                env=config["env"],
-                currencies=config["currencies"],
-                prec=config["precision"],
-            )
+                # 更新活跃状态
+                if stability_monitor:
+                    stability_monitor.update_last_active()
 
-            market_maker.order_manager.reset_open_orders(config["symbol"])
+                market_maker.place_orders(
+                    config,
+                    symbol=config["symbol"],
+                    env=config["env"],
+                    currencies=config["currencies"],
+                    prec=config["precision"],
+                )
+
+                market_maker.order_manager.reset_open_orders(config["symbol"])
+                
+            except Exception as e:
+                logging.error(f"主循环异常: {e}")
+                if stability_monitor:
+                    stability_monitor.record_api_call(success=False)
+                # 短暂休息后继续
+                time.sleep(5)
 
 
 def str2bool(v):
@@ -462,6 +479,10 @@ if __name__ == "__main__":
     strategy_name = config.get("strategy_name", config.get("prefix", "unknown"))
     order_manager = OrderManager(spot, strategy_name=strategy_name)
     
+    # 初始化稳定性监控
+    stability_monitor = StabilityMonitor(strategy_name=strategy_name, check_interval=60)
+    stability_monitor.start_monitoring()
+    
     # 发送启动告警
     run_async_alert(send_startup_alert(strategy_name, config))
     
@@ -469,6 +490,11 @@ if __name__ == "__main__":
     def cleanup():
         """清理函数，在程序退出时执行"""
         try:
+            # 停止稳定性监控
+            if 'stability_monitor' in locals():
+                stability_monitor.stop_monitoring()
+                logging.info("稳定性监控已停止")
+            
             # 发送停止告警
             run_async_alert(send_shutdown_alert(strategy_name, config))
             
@@ -539,4 +565,4 @@ if __name__ == "__main__":
     # if config["Enable_wash_trading"]:
     #     thread4.join()
     if config["Enable_market_making"]:
-        EtfStrategy.run(config, risk_controller, wash_controller, market_maker)
+        EtfStrategy.run(config, risk_controller, wash_controller, market_maker, stability_monitor)
