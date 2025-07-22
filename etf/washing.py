@@ -1,8 +1,10 @@
+from typing import Dict, List, Any, Optional, Union, Tuple
 import time
 import random
 import logging
 import numpy as np
 import redis
+
 from etf.utils.optimization import performance_monitor
 from etf.utils.constants import (
     DEFAULT_REDIS_HOST, DEFAULT_REDIS_PORT, DEFAULT_REDIS_DB,
@@ -13,19 +15,80 @@ from etf.utils.constants import (
 
 
 class WashController:
-    def __init__(self, order_manager, market_maker):
+    """
+    ETF洗盘交易控制器，负责市场流动性维护和价格连续性管理
+    
+    该类实现智能洗盘交易策略，包括：
+    - 基于波动率的风险控制
+    - 自适应交易量调节
+    - 双向交易配对执行
+    - K线连续性维护
+    - 性能监控和统计
+    
+    Attributes:
+        order_manager: 订单管理器实例
+        market_maker: 做市商实例
+        returns (List[float]): 收益率历史记录
+        max_trade_amount (int): 最大单次交易量
+        total_spent (float): 累计交易成本
+        r (redis.Redis): Redis连接实例
+    """
+    
+    def __init__(self, order_manager: Any, market_maker: Any) -> None:
+        """
+        初始化洗盘交易控制器
+        
+        Args:
+            order_manager: 订单管理器实例，用于执行交易
+            market_maker: 做市商实例，用于获取价格信息
+        """
         self.order_manager = order_manager
         self.market_maker = market_maker
-        self.returns = []
+        self.returns: List[float] = []
 
-        self.max_trade_amount = DEFAULT_MAX_TRADE_AMOUNT
-        self.total_spent = 0
-        self.r = redis.Redis(host=DEFAULT_REDIS_HOST, port=DEFAULT_REDIS_PORT, db=DEFAULT_REDIS_DB)
+        self.max_trade_amount: int = DEFAULT_MAX_TRADE_AMOUNT
+        self.total_spent: float = 0.0
+        self.r: redis.Redis = redis.Redis(
+            host=DEFAULT_REDIS_HOST, 
+            port=DEFAULT_REDIS_PORT, 
+            db=DEFAULT_REDIS_DB
+        )
 
     @performance_monitor.time_function("wash_trading")
     def wash(
-        self, symbol, last_mid_price, mid_price, prec=4, prec_amount=2, interval=60
-    ):
+        self, 
+        symbol: str, 
+        last_mid_price: float, 
+        mid_price: float, 
+        prec: int = 4, 
+        prec_amount: int = 2, 
+        interval: int = 60
+    ) -> float:
+        """
+        执行智能洗盘交易策略
+        
+        基于价格变动和波动率分析，执行双向配对交易以维护市场流动性
+        和价格连续性。该方法包含多重风险控制机制。
+        
+        Args:
+            symbol: 交易对符号
+            last_mid_price: 上一个中间价
+            mid_price: 当前中间价  
+            prec: 价格精度位数
+            prec_amount: 数量精度位数
+            interval: K线连续性检查间隔（秒）
+            
+        Returns:
+            float: 调整后的中间价格
+            
+        Risk Controls:
+            - 波动率限制：volatility > 1% 时跳过交易
+            - 最小交易额：确保单笔交易 >= 5 USDT
+            - 动态数量：根据价格涨跌调节交易量
+            
+        Note:
+            该方法会同时创建买单和卖单，形成完整的wash trading配对
+        """
         self.returns.append((mid_price - last_mid_price) / last_mid_price)
         tick = float(f"1e-{prec}")
 
@@ -104,7 +167,24 @@ class WashController:
 
         return last_mid_price
 
-    def get_washing_price(self, config):
+    def get_washing_price(self, config: Dict[str, Any]) -> float:
+        """
+        获取洗盘交易的基准价格
+        
+        从做市商获取当前最优价格，如果做市商未运行则从Redis或文件获取净值
+        
+        Args:
+            config: 策略配置字典，包含净值键等参数
+            
+        Returns:
+            float: 洗盘交易基准价格
+            
+        Fallback Strategy:
+            1. 优先使用做市商的最优卖价
+            2. 从Redis获取净值
+            3. 从文件读取净值
+            4. 使用默认值1.0
+        """
         if self.market_maker.best_sell == 0:
             # 尝试从 Redis 获取净值，如果失败则使用默认值
             try:
@@ -159,7 +239,29 @@ class WashController:
 
         return washing_price
 
-    def run(self, risk_controller, config):
+    def run(self, risk_controller: Any, config: Dict[str, Any]) -> None:
+        """
+        执行完整的洗盘交易流程
+        
+        这是洗盘控制器的主要运行方法，包含完整的交易循环：
+        1. 初始化基准价格
+        2. 检查风险控制状态
+        3. 获取当前市场价格
+        4. 执行洗盘交易策略
+        
+        Args:
+            risk_controller: 风险控制器实例，用于风险评估
+            config: 策略配置字典，包含各种交易参数
+            
+        Flow:
+            - 随机延迟启动（1-5秒）
+            - 获取初始化价格
+            - 基于风险等级决定是否执行交易
+            - 调用wash方法执行具体交易
+            
+        Note:
+            该方法会根据风险控制器的状态动态调整交易行为
+        """
         time.sleep(random.randint(1, 5))
 
         # For initialization
@@ -180,8 +282,24 @@ class WashController:
                 config["kline_continuity_interval"],
             )
     
-    def get_performance_stats(self):
-        """获取wash trading性能统计信息"""
+    def get_performance_stats(self) -> Dict[str, Any]:
+        """
+        获取洗盘交易性能统计信息
+        
+        收集并返回洗盘交易的详细性能指标和运营数据，
+        用于监控交易效率和成本控制
+        
+        Returns:
+            Dict[str, Any]: 包含以下键的性能统计字典：
+                - wash_trading: 洗盘交易性能指标
+                - timestamp: 统计时间戳
+                - total_spent: 累计交易成本
+                - max_trade_amount: 最大单次交易量配置
+                
+        Example:
+            >>> stats = wash_controller.get_performance_stats()
+            >>> print(f"Total wash trades: {stats['wash_trading']['count']}")
+        """
         wash_stats = performance_monitor.get_statistics("wash_trading")
         
         stats = {

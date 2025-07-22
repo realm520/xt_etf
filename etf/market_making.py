@@ -1,3 +1,9 @@
+from typing import Dict, List, Any, Optional, Union, Tuple
+import time
+import logging
+import redis
+import numpy as np
+
 from etf.orderbook import get_orderbook
 from etf.utils.optimization import (
     optimize_order_matching, 
@@ -10,10 +16,6 @@ from etf.utils.constants import (
     DEFAULT_BATCH_SIZE, DEFAULT_BATCH_ID, DEFAULT_CLIENT_ORDER_ID,
     SIDE_BUY, SIDE_SELL, ORDER_TYPE_LIMIT, TIME_IN_FORCE_GTC, BIZ_TYPE_SPOT
 )
-import time
-import numpy as np
-import logging
-import redis
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,20 +24,62 @@ logging.basicConfig(
 
 
 class MarketMaker:
-    def __init__(self, order_manager):
+    """
+    ETF做市商核心类，负责自动化的市场做市和流动性提供
+    
+    该类实现了高级做市策略，包括：
+    - 动态订单簿生成和管理
+    - 基于净值的智能定价
+    - 优化的批量订单处理
+    - 反针对订单保护
+    - 实时性能监控
+    
+    Attributes:
+        order_manager: 订单管理器实例
+        best_sell (float): 当前最优卖价
+        best_buy (float): 当前最优买价
+        r (redis.Redis): Redis连接实例，用于数据缓存和通信
+    """
+    
+    def __init__(self, order_manager: Any) -> None:
+        """
+        初始化做市商
+        
+        Args:
+            order_manager: 订单管理器实例，用于执行订单操作
+        """
         self.order_manager = order_manager
-        self.best_sell = 0
-        self.best_buy = 0
-        self.r = redis.Redis(host=DEFAULT_REDIS_HOST, port=DEFAULT_REDIS_PORT, db=DEFAULT_REDIS_DB)
+        self.best_sell: float = 0.0
+        self.best_buy: float = 0.0
+        self.r: redis.Redis = redis.Redis(
+            host=DEFAULT_REDIS_HOST, 
+            port=DEFAULT_REDIS_PORT, 
+            db=DEFAULT_REDIS_DB
+        )
 
     def make_orders(
         self,
-        symbol=None,
-        clientOrderId=DEFAULT_CLIENT_ORDER_ID,
-        netvalue=1.0,
-        env="qa",
-        ordermanager=None,
-    ):
+        symbol: Optional[str] = None,
+        clientOrderId: str = DEFAULT_CLIENT_ORDER_ID,
+        netvalue: float = 1.0,
+        env: str = "qa",
+        ordermanager: Optional[Any] = None,
+    ) -> None:
+        """
+        创建模拟做市订单（主要用于测试环境）
+        
+        在QA环境中生成假订单用于测试做市逻辑，不实际提交到交易所
+        
+        Args:
+            symbol: 交易对符号，如'btc5l_usdt'
+            clientOrderId: 客户端订单ID
+            netvalue: 净值价格，用作订单簿中间价
+            env: 环境标识，目前只支持'qa'测试环境
+            ordermanager: 订单管理器（已弃用参数）
+            
+        Note:
+            该方法只在qa环境下生效，用于测试做市策略
+        """
         if env == "qa":
             # make fake orders first
             fake_batch_order_bid, fake_batch_order_ask = get_orderbook(
@@ -62,14 +106,37 @@ class MarketMaker:
 
     def place_orders(
         self,
-        config,
-        symbol="btc5l_usdt",
-        clientOrderId=DEFAULT_CLIENT_ORDER_ID,
-        env="qa",
-        ordermanager=None,
-        currencies=None,
-        prec=4,
-    ):
+        config: Dict[str, Any],
+        symbol: str = "btc5l_usdt",
+        clientOrderId: str = DEFAULT_CLIENT_ORDER_ID,
+        env: str = "qa",
+        ordermanager: Optional[Any] = None,
+        currencies: Optional[List[str]] = None,
+        prec: int = 4,
+    ) -> None:
+        """
+        执行智能做市订单放置策略
+        
+        这是核心做市方法，执行以下操作：
+        1. 从Redis或文件获取实时净值
+        2. 生成基于净值的订单簿
+        3. 使用优化算法匹配当前订单
+        4. 批量执行订单添加和取消
+        5. 添加反针对保护订单
+        
+        Args:
+            config: 策略配置字典，包含净值键、价差、精度等参数
+            symbol: 交易对符号
+            clientOrderId: 客户端订单ID（已弃用）
+            env: 环境标识
+            ordermanager: 订单管理器（已弃用参数）
+            currencies: 货币列表（已弃用参数）
+            prec: 价格精度位数
+            
+        Note:
+            该方法使用O(n log n)优化算法进行订单匹配，
+            显著提升大量订单场景下的性能
+        """
         # 尝试从 Redis 获取净值，如果失败则尝试从文件读取
         try:
             redis_value = self.r.get(config["netvalue"])
@@ -279,8 +346,23 @@ class MarketMaker:
         else:
             logging.info(f"[{time.strftime('%H:%M:%S')}] Waiting for net value..")
     
-    def get_performance_stats(self):
-        """获取性能统计信息"""
+    def get_performance_stats(self) -> Dict[str, Any]:
+        """
+        获取做市商性能统计信息
+        
+        收集并返回订单匹配和批量处理的详细性能指标，
+        用于监控系统性能和优化策略参数
+        
+        Returns:
+            Dict[str, Any]: 包含以下键的性能统计字典：
+                - order_matching: 订单匹配算法性能指标
+                - batch_processing: 批量订单处理性能指标  
+                - timestamp: 统计时间戳
+                
+        Example:
+            >>> stats = market_maker.get_performance_stats()
+            >>> print(f"Average matching time: {stats['order_matching']['avg_time']:.4f}s")
+        """
         order_matching_stats = performance_monitor.get_statistics("order_matching")
         batch_processing_stats = performance_monitor.get_statistics("batch_order_processing")
         
