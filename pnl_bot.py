@@ -1,15 +1,9 @@
 import requests
 import json
 from datetime import datetime, timedelta, date
-# import requests
-# import json
 import schedule
 import time
 import os
-
-#today = date.today()
-#print(today)
-# from datetime import datetime
 class LarkBot:
     def __init__(self, app_id, app_secret):
         self.app_id = app_id
