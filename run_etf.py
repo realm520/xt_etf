@@ -436,9 +436,35 @@ if __name__ == "__main__":
         )
 
     elif config["env"] == "prod":
-        # 使用安全的 API 密钥加载器
+        # 使用安全的 API 密钥加载器 - 生产环境强制使用加密密钥
         from etf.utils.crypto import load_api_keys
-        
+        from pathlib import Path
+
+        # 检查是否存在加密文件
+        enc_file = Path(config["apikey"]).with_suffix('.enc')
+        plain_file = Path(config["apikey"])
+
+        if not enc_file.exists() and plain_file.exists():
+            logging.error("=" * 70)
+            logging.error("🚨 安全警告: 生产环境检测到明文 API 密钥!")
+            logging.error(f"明文文件: {plain_file}")
+            logging.error("=" * 70)
+            logging.error("请立即执行以下步骤加密您的 API 密钥:")
+            logging.error("1. 设置加密密码: export ETF_KEY_PASSWORD='your-secure-password'")
+            logging.error("2. 运行加密脚本: python scripts/encrypt_apikeys.py")
+            logging.error("3. 或使用命令: python -c \"from etf.utils.crypto import encrypt_api_keys; encrypt_api_keys('APIKey.json')\"")
+            logging.error("=" * 70)
+            logging.error("为了安全，程序将在 10 秒后退出...")
+            logging.error("如需使用明文密钥（仅用于开发测试），请设置环境变量: ALLOW_PLAIN_KEYS=true")
+
+            # 检查是否允许明文密钥（仅用于开发/测试）
+            if os.environ.get("ALLOW_PLAIN_KEYS", "").lower() != "true":
+                import time
+                time.sleep(10)
+                raise RuntimeError("生产环境禁止使用明文 API 密钥，程序已终止")
+            else:
+                logging.warning("检测到 ALLOW_PLAIN_KEYS=true，允许使用明文密钥（仅用于开发/测试）")
+
         try:
             apikey = load_api_keys(config["apikey"])
             spot = Spot(
@@ -447,14 +473,9 @@ if __name__ == "__main__":
                 secret_key=apikey["xt_" + prefix]["secret_key"],
             )
         except FileNotFoundError:
-            # 向后兼容：如果都不存在，使用原始方式
-            with open(config["apikey"], "r", encoding="utf8") as input:
-                apikey = json.load(input)
-                spot = Spot(
-                    host="https://sapi.xt.com",
-                    access_key=apikey["xt_" + prefix]["access_key"],
-                    secret_key=apikey["xt_" + prefix]["secret_key"],
-                )
+            logging.error(f"错误: 找不到 API 密钥文件 {config['apikey']} 或对应的 .enc 文件")
+            logging.error("请确保密钥文件存在并已正确加密")
+            raise
 
     # risk related
     risk_params = {

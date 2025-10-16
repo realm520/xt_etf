@@ -1,5 +1,6 @@
 # 敏感信息和配置文件
 APIKey*.json
+APIKey*.enc
 *.key
 *.pem
 .env
@@ -91,7 +92,6 @@ dmypy.json
 .pyre/
 
 # PM2
-ecosystem.config.js
 pm2.log
 
 # 临时文件
