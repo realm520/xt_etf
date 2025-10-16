@@ -564,7 +564,10 @@ if __name__ == "__main__":
     # 添加止损配置（如果在策略配置中存在）
     if "stop_loss" in strategy_config:
         risk_params["stop_loss"] = strategy_config["stop_loss"]
-    
+
+    # 定义策略名称（在使用前定义）
+    strategy_name = config.get("strategy_name", config.get("prefix", "unknown"))
+
     logging.info("run RiskController")
     risk_controller = RiskController(spot, risk_params, strategy_name=strategy_name)
     if config["Enable_risk_controller"]:
@@ -572,7 +575,6 @@ if __name__ == "__main__":
 
     # market maker related
     # 传递策略名称给 OrderManager
-    strategy_name = config.get("strategy_name", config.get("prefix", "unknown"))
     order_manager = OrderManager(spot, strategy_name=strategy_name)
     
     # 初始化稳定性监控
