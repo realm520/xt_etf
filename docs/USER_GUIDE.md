@@ -50,8 +50,6 @@ python run_etf.py --strategy stg3l
 
 ## 系统安装
 
-### 方法1: 使用uv（推荐）
-
 ```bash
 # 安装uv包管理器
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -62,18 +60,6 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # 激活虚拟环境
 source .venv/bin/activate  # Linux/macOS
 .venv\Scripts\activate     # Windows
-```
-
-### 方法2: 传统pip安装
-
-```bash
-# 创建虚拟环境
-python -m venv .venv
-source .venv/bin/activate
-
-# 安装依赖
-pip install -e .
-pip install -r requirements.txt
 ```
 
 ### 系统依赖
