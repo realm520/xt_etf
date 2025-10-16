@@ -62,9 +62,6 @@ uv pip install -e ".[dev]"
 # 添加新依赖
 uv pip install package-name
 
-# 更新依赖列表
-uv pip freeze > requirements.txt
-
 # 同步依赖（根据 pyproject.toml）
 uv pip sync
 ```

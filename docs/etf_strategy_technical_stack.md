@@ -347,7 +347,7 @@ xt_etf/
 ├── scripts/          # 运维脚本
 ├── docker/           # Docker配置
 ├── config/           # 配置文件
-└── requirements.txt  # 依赖列表
+└── pyproject.toml    # 项目配置和依赖
 ```
 
 ### 3. 部署与运维

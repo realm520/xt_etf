@@ -45,9 +45,6 @@ uv pip sync
 
 # 查看已安装的包
 uv pip list
-
-# 导出依赖
-uv pip freeze > requirements.txt
 ```
 
 ### Running Tests
@@ -82,8 +79,8 @@ pre-commit run --all-files
 # Install in development mode
 pip install -e .
 
-# Install with all dependencies
-pip install -r requirements.txt
+# Install with all dependencies (包括开发依赖)
+pip install -e ".[dev]"
 ```
 
 ### Running the Trading System

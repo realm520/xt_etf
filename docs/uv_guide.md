@@ -51,12 +51,6 @@ uv pip install package-name
 
 # 查看已安装的包
 uv pip list
-
-# 导出依赖
-uv pip freeze > requirements.txt
-
-# 从 requirements.txt 安装
-uv pip install -r requirements.txt
 ```
 
 ### 项目管理
