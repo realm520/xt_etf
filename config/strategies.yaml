@@ -24,7 +24,7 @@ strategies:
     kline_continuity_interval: 60
 
     # 功能开关
-    Enable_risk_controller: false
+    Enable_risk_controller: true    # ✅ 启用风险控制器（3x杠杆）
     Enable_wash_trading: true
     Enable_hedging: false
     Enable_market_making: true
@@ -78,7 +78,7 @@ strategies:
     kline_continuity_interval: 60
 
     # 功能开关
-    Enable_risk_controller: false
+    Enable_risk_controller: true    # ✅ 启用风险控制器（3x杠杆）
     Enable_wash_trading: true
     Enable_hedging: false
     Enable_market_making: true
@@ -132,7 +132,7 @@ strategies:
     kline_continuity_interval: 60
 
     # 功能开关
-    Enable_risk_controller: false
+    Enable_risk_controller: true    # ✅ 启用风险控制器（5x杠杆 long）
     Enable_wash_trading: true
     Enable_hedging: false
     Enable_market_making: true
@@ -155,12 +155,12 @@ strategies:
     max_single_change: 0.10  # 最大单次变化率限制
     max_restart_gap: 300     # 最大重启间隔（秒）
     
-    # 止损配置
+    # 止损配置 - 5x杠杆做多，更严格的止损
     stop_loss:
       enabled: true          # 是否启用止损
-      fixed_threshold: -0.02 # 固定止损阈值 -2%
-      trailing_stop: 0.01    # 移动止损 1%
-      time_stop: 24          # 时间止损（小时）
+      fixed_threshold: -0.015 # 固定止损阈值 -1.5% (5x杠杆更严格)
+      trailing_stop: 0.008    # 移动止损 0.8%
+      time_stop: 12          # 时间止损 12小时（高杠杆缩短持仓时间）
       cooldown: 60           # 止损后冷却时间（分钟）
       enable_partial_close: true  # 是否启用部分平仓
 
@@ -186,7 +186,7 @@ strategies:
     kline_continuity_interval: 60
 
     # 功能开关
-    Enable_risk_controller: false
+    Enable_risk_controller: true    # ✅ 启用风险控制器（5x杠杆 short）
     Enable_wash_trading: true
     Enable_hedging: false
     Enable_market_making: true
@@ -208,12 +208,12 @@ strategies:
     rebalance_threshold: 0.05 # 再平衡阈值
     max_single_change: 0.10  # 最大单次变化率限制
     max_restart_gap: 300     # 最大重启间隔（秒）
-    
-    # 止损配置
+
+    # 止损配置 - 5x杠杆做空，最严格的止损（做空风险最高）
     stop_loss:
       enabled: true          # 是否启用止损
-      fixed_threshold: -0.02 # 固定止损阈值 -2%
-      trailing_stop: 0.01    # 移动止损 1%
-      time_stop: 24          # 时间止损（小时）
+      fixed_threshold: -0.01 # 固定止损阈值 -1% (做空风险最高，最严格)
+      trailing_stop: 0.005   # 移动止损 0.5%
+      time_stop: 8           # 时间止损 8小时（做空风险高，更短持仓时间）
       cooldown: 60           # 止损后冷却时间（分钟）
       enable_partial_close: true  # 是否启用部分平仓

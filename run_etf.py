@@ -102,6 +102,81 @@ class EtfStrategy:
                 if stability_monitor:
                     stability_monitor.update_last_active()
 
+                # ✅ 风险监控：每次循环更新风险等级
+                if config["Enable_risk_controller"]:
+                    risk_controller.risk_monitor(symbol=config["symbol"])
+                    logging.info(f"风险等级: {risk_controller.risk_level}")
+
+                # ✅ 持仓信息更新（用于止损计算）
+                if risk_controller.stop_loss_manager and config.get("currencies"):
+                    try:
+                        # 获取当前持仓信息
+                        delta_pos, position, mid_price, delta_amt = order_manager.get_position3(
+                            config["symbol"], config["currencies"]
+                        )
+
+                        # 判断是否有持仓
+                        if abs(delta_amt) > 0.01:  # 持仓量阈值
+                            # 确定持仓方向（做多/做空）
+                            # ETF命名规则: stg3l = 3倍做多, stg3s = 3倍做空
+                            symbol_lower = config["symbol"].lower()
+                            side = "short" if symbol_lower.endswith("s_usdt") else "long"
+
+                            # 获取入场价格（使用初始金额计算平均入场价）
+                            if order_manager.init_amount and order_manager.init_amount != 0:
+                                entry_price = (position - order_manager.init_amount * mid_price) / delta_amt if delta_amt != 0 else mid_price
+                            else:
+                                entry_price = mid_price
+
+                            # 更新止损管理器的持仓信息
+                            risk_controller.update_position_for_stop_loss(
+                                symbol=config["symbol"],
+                                side=side,
+                                amount=abs(delta_amt),
+                                entry_price=abs(entry_price),
+                                current_price=mid_price
+                            )
+                            logging.debug(f"止损管理器已更新: side={side}, amount={abs(delta_amt):.4f}, entry={abs(entry_price):.4f}, current={mid_price:.4f}")
+                    except Exception as e:
+                        logging.warning(f"更新止损信息失败: {e}")
+
+                # ✅ 止损检查：异步检查是否触发止损
+                if risk_controller.stop_loss_manager and not risk_controller.is_in_cooldown:
+                    try:
+                        # 创建新的事件循环来运行异步止损检查
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        stop_loss_result = loop.run_until_complete(
+                            risk_controller.check_stop_loss(config["symbol"])
+                        )
+                        loop.close()
+
+                        if stop_loss_result and stop_loss_result.triggered:
+                            logging.error("=" * 70)
+                            logging.error(f"🚨 止损触发: {stop_loss_result.reason}")
+                            logging.error(f"亏损率: {stop_loss_result.loss_rate:.2%}")
+                            logging.error(f"需要平仓数量: {stop_loss_result.position_to_close:.4f}")
+                            logging.error(f"止损动作: {stop_loss_result.action.value}")
+                            logging.error("=" * 70)
+
+                            # 执行止损操作：撤销所有订单
+                            logging.warning("执行止损: 撤销所有挂单")
+                            order_manager.cancel_all_open_orders(config["symbol"])
+
+                            # 暂停交易一段时间（冷却期）
+                            cooldown_time = risk_controller.stop_loss_manager.cooldown_minutes * 60
+                            logging.warning(f"进入冷却期 {cooldown_time/60:.0f} 分钟，暂停交易")
+                            time.sleep(10)  # 短暂暂停，让撤单生效
+                            continue  # 跳过本轮交易
+
+                    except Exception as e:
+                        logging.error(f"止损检查失败: {e}")
+
+                # ✅ 风险等级检查：根据风险等级决定是否继续交易
+                if not order_manager.risk_actions(risk_controller.risk_level):
+                    logging.warning(f"风险等级 {risk_controller.risk_level} 过高，暂停市场做市")
+                    continue
+
                 market_maker.place_orders(
                     config,
                     symbol=config["symbol"],
@@ -111,7 +186,7 @@ class EtfStrategy:
                 )
 
                 market_maker.order_manager.reset_open_orders(config["symbol"])
-                
+
             except Exception as e:
                 logging.error(f"主循环异常: {e}")
                 if stability_monitor:
