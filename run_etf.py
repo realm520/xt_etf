@@ -6,6 +6,7 @@ from etf.xt import Spot
 from etf.stability_monitor import StabilityMonitor
 from hedging import Hedge
 from etf.alert import send_direct_alert, AlertLevel, get_alert_manager
+from etf.observability import init_otel, MetricsCollector  # OpenTelemetry 集成
 import json
 import time
 import logging
@@ -107,6 +108,13 @@ class EtfStrategy:
                     try:
                         risk_controller.risk_monitor(symbol=config["symbol"])
                         logging.info(f"风险等级: {risk_controller.risk_level}")
+
+                        # 📊 记录风险等级指标
+                        if metrics_collector:
+                            metrics_collector.record_risk_level(
+                                risk_controller.risk_level,
+                                strategy_name
+                            )
                     except (IndexError, Exception) as e:
                         logging.warning(f"风险监控失败: {e}")
                         # 保持当前风险等级，继续运行
@@ -162,6 +170,14 @@ class EtfStrategy:
                             logging.error(f"需要平仓数量: {stop_loss_result.position_to_close:.4f}")
                             logging.error(f"止损动作: {stop_loss_result.action.value}")
                             logging.error("=" * 70)
+
+                            # 📊 记录止损触发指标
+                            if metrics_collector:
+                                metrics_collector.record_stop_loss(
+                                    strategy_name,
+                                    stop_loss_result.reason,
+                                    stop_loss_result.loss_rate
+                                )
 
                             # 执行止损操作：撤销所有订单
                             logging.warning("执行止损: 撤销所有挂单")
@@ -571,6 +587,30 @@ if __name__ == "__main__":
 
     # 定义策略名称（在使用前定义）
     strategy_name = config.get("strategy_name", config.get("prefix", "unknown"))
+
+    # ===== 初始化 OpenTelemetry 可观测性 =====
+    try:
+        otlp_endpoint = os.getenv("OTLP_ENDPOINT", "http://localhost:4317")
+        enable_otel = os.getenv("ENABLE_OTEL", "true").lower() == "true"
+
+        if enable_otel:
+            meter = init_otel(
+                service_name=f"etf-{strategy_name}",
+                otlp_endpoint=otlp_endpoint,
+                enable_metrics=True,
+                enable_traces=False,  # Traces 可选
+                export_interval_ms=10000,  # 10秒导出一次
+                environment=config.get("env", "production")
+            )
+            metrics_collector = MetricsCollector(meter)
+            logging.info(f"✅ OpenTelemetry 初始化成功: endpoint={otlp_endpoint}")
+        else:
+            metrics_collector = None
+            logging.info("⏸️ OpenTelemetry 已禁用 (ENABLE_OTEL=false)")
+    except Exception as e:
+        logging.error(f"❌ OpenTelemetry 初始化失败: {e}")
+        logging.warning("系统将继续运行，但不会导出 Metrics")
+        metrics_collector = None
 
     logging.info("run RiskController")
     risk_controller = RiskController(spot, risk_params, strategy_name=strategy_name)

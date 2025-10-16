@@ -15,13 +15,17 @@ import json
 import time
 import redis
 import asyncio
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, TYPE_CHECKING
 from loguru import logger
 from datetime import datetime, timedelta
 
 from etf.xt import Spot
 from etf.utils.ds import Queue
 from etf.alert import send_alert, AlertLevel
+
+# 类型提示（避免循环导入）
+if TYPE_CHECKING:
+    from etf.observability.metrics import MetricsCollector
 
 
 class ImprovedNetValue:
@@ -38,6 +42,7 @@ class ImprovedNetValue:
         long: bool = True,
         max_single_change: float = 0.10,  # 最大单次变化率限制
         max_restart_gap: int = 300,  # 最大重启间隔（秒）
+        metrics_collector: Optional['MetricsCollector'] = None,  # OpenTelemetry 指标收集器
     ):
         self.symbol = symbol
         self.m_lever = m_lever
@@ -48,6 +53,7 @@ class ImprovedNetValue:
         self.time_gap_fee = daily_fee / (24 * 60 * 60) * time_gap_second
         self.max_single_change = max_single_change
         self.max_restart_gap = max_restart_gap
+        self.metrics_collector = metrics_collector  # OpenTelemetry 指标收集器
 
         # Redis连接
         self.r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
@@ -356,6 +362,20 @@ class ImprovedNetValue:
 
                 # 保存到Redis
                 self._save_to_redis(self.net_value_data)
+
+                # 📊 记录净值指标（OpenTelemetry）
+                if self.metrics_collector:
+                    try:
+                        strategy_name = f"{self.symbol.split('_')[0]}{self.m_lever}{'l' if self.long else 's'}"
+                        self.metrics_collector.record_net_value(
+                            value=net_value_after_fee,
+                            strategy=strategy_name,
+                            leverage=self.m_lever,
+                            direction="long" if self.long else "short",
+                            change_rate=net_value_change_rate
+                        )
+                    except Exception as e:
+                        logger.error(f"记录净值指标失败: {e}")
 
                 logger.info(
                     f"[{datetime.now().strftime('%H:%M:%S')}] "

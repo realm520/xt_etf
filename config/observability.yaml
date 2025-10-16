@@ -1,0 +1,30 @@
+# OpenTelemetry 可观测性配置
+
+opentelemetry:
+  # OTLP Collector 端点配置
+  otlp_endpoint: "http://localhost:4317"  # gRPC 端点
+
+  # 可通过环境变量覆盖: OTLP_ENDPOINT
+
+  # 服务配置
+  service:
+    version: "1.0.0"
+    environment: "production"  # production/qa/dev
+
+  # Metrics 配置
+  metrics:
+    enabled: true
+    export_interval_seconds: 10  # 导出间隔
+
+  # Traces 配置（可选，暂未启用）
+  traces:
+    enabled: false
+    sampling_rate: 0.1  # 10% 采样率
+
+  # Logs 配置（未来扩展）
+  logs:
+    enabled: false
+
+# 环境变量说明：
+# export OTLP_ENDPOINT="http://otel-collector:4317"
+# export ENABLE_OTEL="true"  # 启用/禁用 OpenTelemetry
