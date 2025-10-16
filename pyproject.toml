@@ -16,6 +16,9 @@ dependencies = [
     "pandas",
     "numpy",
     "loguru",
+    "httpx",
+    "aiofiles",
+    "sqlalchemy[asyncio]",
     "superclaude>=3.0.0.1",
     "python-pptx>=1.0.2",
 ]
@@ -27,6 +30,8 @@ dev = [
     "pytest-timeout",
     "pytest-xdist",
     "pytest-cov",
+    "requests-mock",
+    "aioresponses",
     "ruff",
     "pyright",
     "pre-commit",
@@ -59,9 +64,10 @@ python_functions = ["test_*"]
 markers = [
     "slow: marks tests as slow (may take more than 1 second)",
     "integration: marks tests as integration tests",
-    "unit: marks tests as unit tests", 
+    "unit: marks tests as unit tests",
     "redis_required: marks tests that require Redis",
     "performance: marks tests as performance benchmarks",
+    "options: marks tests for options trading functionality",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",
@@ -113,6 +119,8 @@ dev-dependencies = [
     "pytest-timeout",
     "pytest-xdist",
     "pytest-cov",
+    "requests-mock",
+    "aioresponses",
     "ruff",
     "pyright",
     "pre-commit",
