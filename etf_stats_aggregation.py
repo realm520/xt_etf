@@ -1,7 +1,3 @@
-from etf.risk import RiskController
-from etf.washing import WashController
-from etf.market_making import MarketMaker
-from etf.order_manager import OrderManager
 from etf.xt import Spot
 from hedging import Hedge
 
@@ -89,8 +85,10 @@ class Etf_stats:
     def get_position_bn(self):
         from binance import Client
 
-        api_key = "lDHuIavZpEErNyC27HGnJSMOb0ArGR0lBBNJGEWU56NnxjxUwljgnBn97RFScuZN"
-        api_secret = "zlo0LVMVqNTDJRCby7QZMYuPRSY8QMLOokK6UnmqtUZ5YDP9GIqsvqCnXh7bAPSV"
+        # TODO: Move API credentials to secure configuration file
+        # These should be loaded from APIKey.json or environment variables
+        api_key = "REPLACE_WITH_CONFIG"
+        api_secret = "REPLACE_WITH_CONFIG"
         bnclient = Client(api_key, api_secret)
 
         info = bnclient.futures_position_information()
@@ -152,7 +150,6 @@ while True:
         )
 
     logging_info += f"xt_usdt_remain_sum {xt_usdt_remain_sum} xt_coin_reduce_sum {xt_coin_reduce_sum} xt_coin_reduce_convertusdt_sum {xt_coin_reduce_convertusdt_sum} bn_unRealizedProfit {bn_unRealizedProfit} bn_usdt_remain {bn_usdt_remain} bn_cost_usdt {bn_cost_usdt} bn_coin_remain {bn_coin_remain} bn_entry_price {bn_entry_price}"
-    import time
     from datetime import datetime
 
     now = datetime.now()

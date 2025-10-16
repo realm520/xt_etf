@@ -1,8 +1,8 @@
 from binance import Client
 # from pyxt import Spot
-api_key = 'lDHuIavZpEErNyC27HGnJSMOb0ArGR0lBBNJGEWU56NnxjxUwljgnBn97RFScuZN'
-api_secret = 'zlo0LVMVqNTDJRCby7QZMYuPRSY8QMLOokK6UnmqtUZ5YDP9GIqsvqCnXh7bAPSV'
-import time
+# TODO: Move API credentials to secure configuration file
+api_key = 'REPLACE_WITH_CONFIG'
+api_secret = 'REPLACE_WITH_CONFIG'
 # from copy import deepcopy
 import logging
 logging.shutdown()
@@ -86,9 +86,8 @@ class Hedge():
             #    if item["asset"] == config["symbol"]:
             #        logging.info(info)
             
-            '''
-            list: [{'accountAlias': 'fWoCfWmYXqSgFzSg', 'asset': 'BTC', 'balance': '0.00000000', 'crossWalletBalance': '0.00000000', 'crossUnPnl': '0.00000000', 'availableBalance': '0.00000000', 'maxWithdrawAmount': '0.00000000', 'marginAvailable': True, 'updateTime': 0}]
-            '''
+            # Example response format:
+            # [{'accountAlias': 'fWoCfWmYXqSgFzSg', 'asset': 'BTC', 'balance': '0.00000000', ...}]
             
             # res = client.get_account()
             # print(res)

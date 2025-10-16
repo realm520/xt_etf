@@ -169,12 +169,10 @@ class Hedge:
         self.orders = []
         self.failed_orders = []
 
-        APP_ID = "cli_a888a93b54389029"
-        APP_SECRET = "M44bRQxX9oJKFFP4USGaufyMKyA62hbw"
-        # Etf Prod Alert
-
-        # https://open.larksuite.com/open-apis/bot/v2/hook/
-        # bfcc4b0a-15ce-4775-a958-24d4ad02ad3f
+        # TODO: Move APP credentials to secure configuration file
+        APP_ID = "REPLACE_WITH_CONFIG"
+        APP_SECRET = "REPLACE_WITH_CONFIG"
+        # Etf Prod Alert - webhook URL should also be in config
         self.bot = LarkBot(APP_ID, APP_SECRET)
 
     def create_order(self, symbol, side, price, amount):
