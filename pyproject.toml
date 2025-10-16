@@ -17,6 +17,7 @@ dependencies = [
     "numpy",
     "loguru",
     "superclaude>=3.0.0.1",
+    "python-pptx>=1.0.2",
 ]
 
 [project.optional-dependencies]
