@@ -104,8 +104,12 @@ class EtfStrategy:
 
                 # ✅ 风险监控：每次循环更新风险等级
                 if config["Enable_risk_controller"]:
-                    risk_controller.risk_monitor(symbol=config["symbol"])
-                    logging.info(f"风险等级: {risk_controller.risk_level}")
+                    try:
+                        risk_controller.risk_monitor(symbol=config["symbol"])
+                        logging.info(f"风险等级: {risk_controller.risk_level}")
+                    except (IndexError, Exception) as e:
+                        logging.warning(f"风险监控失败: {e}")
+                        # 保持当前风险等级，继续运行
 
                 # ✅ 持仓信息更新（用于止损计算）
                 if risk_controller.stop_loss_manager and config.get("currencies"):
@@ -571,7 +575,12 @@ if __name__ == "__main__":
     logging.info("run RiskController")
     risk_controller = RiskController(spot, risk_params, strategy_name=strategy_name)
     if config["Enable_risk_controller"]:
-        risk_controller.risk_monitor(symbol=config["symbol"])
+        try:
+            risk_controller.risk_monitor(symbol=config["symbol"])
+            logging.info(f"初始风险等级: {risk_controller.risk_level}")
+        except (IndexError, Exception) as e:
+            logging.warning(f"启动时风险监控失败（可能是空订单簿）: {e}")
+            logging.info("使用默认风险等级，主循环中将继续监控")
 
     # market maker related
     # 传递策略名称给 OrderManager
@@ -579,7 +588,10 @@ if __name__ == "__main__":
     
     # 初始化稳定性监控
     stability_monitor = StabilityMonitor(strategy_name=strategy_name, check_interval=60)
-    stability_monitor.start_monitoring()
+    # TODO: stability_monitor.start_monitoring() 需要异步事件循环
+    # 暂时只使用同步方法（update_last_active, record_api_call等）
+    # 完整的异步监控将在 Phase 2 实现
+    logging.info("稳定性监控器已初始化（仅同步模式）")
     
     # 发送启动告警
     run_async_alert(send_startup_alert(strategy_name, config))
