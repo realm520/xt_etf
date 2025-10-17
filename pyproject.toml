@@ -19,6 +19,7 @@ dependencies = [
     "httpx",
     "aiofiles",
     "sqlalchemy[asyncio]",
+    "asyncpg>=0.29.0",
     "superclaude>=3.0.0.1",
     "python-pptx>=1.0.2",
     # OpenTelemetry 可观测性

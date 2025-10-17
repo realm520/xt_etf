@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 
 from etf.xt import Spot
 from etf.utils.ds import Queue
-from etf.alert import send_alert, AlertLevel
+# Alert system removed - using logging only
 
 # 类型提示（避免循环导入）
 if TYPE_CHECKING:
@@ -195,22 +195,15 @@ class ImprovedNetValue:
                 "missed_intervals": missed_intervals,
                 "timestamp": time.time(),
             })
-            
-            # 发送恢复告警
-            asyncio.create_task(send_alert(
-                "net_value_recovery",
-                {
-                    "event_type": "net_value_recovery",
-                    "gap_seconds": gap_seconds,
-                    "missed_intervals": missed_intervals,
-                    "symbol": self.symbol,
-                    "leverage": self.m_lever,
-                    "direction": "做多" if self.long else "做空",
-                    "old_net_value": data["net_value"],
-                    "management_fee_deducted": total_fee_rate * data["net_value"]
-                },
-                strategy_name=f"{self.symbol}{self.m_lever}{'l' if self.long else 's'}"
-            ))
+
+            # 记录恢复日志（告警已移除，使用日志记录）
+            logger.warning(f"净值恢复事件:")
+            logger.warning(f"  断线时间: {gap_seconds:.1f}秒")
+            logger.warning(f"  遗漏周期: {missed_intervals}个")
+            logger.warning(f"  交易对: {self.symbol}")
+            logger.warning(f"  杠杆: {self.m_lever}x {'做多' if self.long else '做空'}")
+            logger.warning(f"  净值: {data['net_value']:.6f}")
+            logger.warning(f"  补扣管理费: {total_fee_rate * data['net_value']:.6f}")
 
         except Exception as e:
             logger.error(f"恢复净值失败: {e}")
@@ -259,21 +252,15 @@ class ImprovedNetValue:
                 "p1": p1,
                 "timestamp": time.time(),
             })
-            
-            # 发送异常价格告警
-            asyncio.create_task(send_alert(
-                "abnormal_price",
-                {
-                    "price_change_rate": abs(v),
-                    "symbol": self.symbol,
-                    "old_price": p0,
-                    "new_price": p1,
-                    "leverage": self.m_lever,
-                    "direction": "做多" if self.long else "做空"
-                },
-                strategy_name=f"{self.symbol}{self.m_lever}{'l' if self.long else 's'}"
-            ))
-            
+
+            # 记录异常价格日志（告警已移除，使用日志记录）
+            logger.error(f"异常价格变化:")
+            logger.error(f"  变化率: {abs(v):.4f}")
+            logger.error(f"  交易对: {self.symbol}")
+            logger.error(f"  旧价格: {p0:.4f}")
+            logger.error(f"  新价格: {p1:.4f}")
+            logger.error(f"  杠杆: {self.m_lever}x {'做多' if self.long else '做空'}")
+
             v = self.max_single_change if v > 0 else -self.max_single_change
             # 调整p1为限制后的价格，用于后续再平衡计算
             p1 = p0 * (1 + v)
@@ -384,21 +371,17 @@ class ImprovedNetValue:
                     f"变化率: {net_value_change_rate:.4%}, "
                     f"更新次数: {self.net_value_data['update_count']}"
                 )
-                
+
                 # 检查净值异常
                 if abs(net_value_change_rate) > 0.05:  # 5% 变化
-                    asyncio.create_task(send_alert(
-                        "net_value_spike" if net_value_change_rate > 0 else "net_value_crash",
-                        {
-                            "net_value_change_rate": net_value_change_rate,
-                            "symbol": self.symbol,
-                            "old_net_value": old_net_value,
-                            "new_net_value": net_value_after_fee,
-                            "leverage": self.m_lever,
-                            "direction": "做多" if self.long else "做空"
-                        },
-                        strategy_name=f"{self.symbol}{self.m_lever}{'l' if self.long else 's'}"
-                    ))
+                    # 记录净值异常日志（告警已移除，使用日志记录）
+                    event_type = "净值暴涨" if net_value_change_rate > 0 else "净值暴跌"
+                    logger.warning(f"{event_type}:")
+                    logger.warning(f"  变化率: {net_value_change_rate:.4%}")
+                    logger.warning(f"  交易对: {self.symbol}")
+                    logger.warning(f"  旧净值: {old_net_value:.6f}")
+                    logger.warning(f"  新净值: {net_value_after_fee:.6f}")
+                    logger.warning(f"  杠杆: {self.m_lever}x {'做多' if self.long else '做空'}")
 
                 # 等待下一个周期
                 time.sleep(self.time_gap_second)

@@ -65,7 +65,8 @@ class Spot:
         query_str = '' if query is None else '&'.join(
             [f"{key}={json.dumps(query[key]) if type(query[key]) in [dict, list] else query[key]}" for key in
              sorted(query)])  # 没有接口同时使用query和body
-        body_str = json.dumps(data) if data is not None else ''
+        # 根据XT官方签名规则：空body（{}、[]、None）不应包含在签名中
+        body_str = json.dumps(data) if data else ''
         y = '#' + '#'.join([i for i in [method, path_str, query_str, body_str] if i])
         x = '&'.join([f"{key}={headers[key]}" for key in sorted(headers)])
         sign = f"{x}{y}"

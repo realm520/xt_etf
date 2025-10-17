@@ -56,39 +56,50 @@ class WashController:
 
     @performance_monitor.time_function("wash_trading")
     def wash(
-        self, 
-        symbol: str, 
-        last_mid_price: float, 
-        mid_price: float, 
-        prec: int = 4, 
-        prec_amount: int = 2, 
+        self,
+        symbol: str,
+        last_mid_price: float,
+        mid_price: float,
+        prec: int = 4,
+        prec_amount: int = 2,
         interval: int = 60
     ) -> float:
         """
         执行智能洗盘交易策略
-        
+
         基于价格变动和波动率分析，执行双向配对交易以维护市场流动性
         和价格连续性。该方法包含多重风险控制机制。
-        
+
         Args:
             symbol: 交易对符号
             last_mid_price: 上一个中间价
-            mid_price: 当前中间价  
+            mid_price: 当前中间价
             prec: 价格精度位数
             prec_amount: 数量精度位数
             interval: K线连续性检查间隔（秒）
-            
+
         Returns:
             float: 调整后的中间价格
-            
+
         Risk Controls:
+            - 黑名单检查：跳过被永久错误标记的交易对
             - 波动率限制：volatility > 1% 时跳过交易
             - 最小交易额：确保单笔交易 >= 5 USDT
             - 动态数量：根据价格涨跌调节交易量
-            
+
         Note:
             该方法会同时创建买单和卖单，形成完整的wash trading配对
         """
+        # 检查交易对是否在黑名单中
+        if self.order_manager.is_symbol_blacklisted(symbol):
+            blacklist_info = self.order_manager.get_blacklist_info(symbol)
+            logging.warning(
+                f"跳过洗盘交易: {symbol} 在黑名单中, "
+                f"原因: {blacklist_info.get('reason')} - {blacklist_info.get('description')}, "
+                f"剩余时间: {blacklist_info.get('remaining_seconds')}秒"
+            )
+            return mid_price  # 直接返回当前价格，不执行洗盘
+
         self.returns.append((mid_price - last_mid_price) / last_mid_price)
         tick = float(f"1e-{prec}")
 

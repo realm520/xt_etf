@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
 
-from etf.alert import send_alert, AlertLevel
+from etf.alert import AlertLevel
 
 
 class HealthStatus(Enum):
@@ -99,16 +99,9 @@ class StabilityMonitor:
             logging.info("监控循环被取消")
         except Exception as e:
             logging.error(f"监控循环异常: {e}")
-            # 发送监控系统异常告警
-            await send_alert(
-                "system_error",
-                {
-                    "error_type": "monitoring_failure",
-                    "error_message": str(e),
-                    "component": "stability_monitor"
-                },
-                strategy_name=self.strategy_name
-            )
+            # 记录监控系统异常（告警已移除，使用日志记录）
+            logging.error(f"监控系统错误: monitoring_failure - {e}")
+            logging.error(f"策略: {self.strategy_name}, 组件: stability_monitor")
 
     async def _perform_health_check(self):
         """执行健康检查"""
@@ -253,16 +246,16 @@ class StabilityMonitor:
         return metrics
 
     async def _send_health_alert(self, issues: List[HealthMetric], level: AlertLevel):
-        """发送健康状态告警"""
+        """记录健康状态问题（告警已移除）"""
         try:
             # 构建告警消息
             alert_key = f"health_alert_{level.value}_{len(issues)}"
-            
-            # 防止重复告警 (5分钟内不重复发送相同告警)
+
+            # 防止重复记录 (5分钟内不重复记录相同问题)
             if alert_key in self.alerts_sent:
                 if time.time() - self.alerts_sent[alert_key] < 300:
                     return
-            
+
             issue_details = []
             for issue in issues:
                 issue_details.append({
@@ -272,24 +265,17 @@ class StabilityMonitor:
                     "unit": issue.unit,
                     "description": issue.description
                 })
-            
-            await send_alert(
-                "system_health",
-                {
-                    "level": level.value,
-                    "issues_count": len(issues),
-                    "issues": issue_details,
-                    "strategy": self.strategy_name,
-                    "timestamp": datetime.now().isoformat()
-                },
-                strategy_name=self.strategy_name
-            )
-            
+
+            # 记录健康问题（告警已移除，使用日志记录）
+            logging.warning(f"系统健康检查: {level.value}级，发现{len(issues)}个问题")
+            logging.warning(f"策略: {self.strategy_name}, 时间: {datetime.now().isoformat()}")
+            for detail in issue_details:
+                logging.warning(f"  - {detail['description']}: {detail['value']}{detail['unit']} (阈值: {detail['threshold']}{detail['unit']})")
+
             self.alerts_sent[alert_key] = time.time()
-            logging.warning(f"发送{level.value}级健康告警，发现{len(issues)}个问题")
-            
+
         except Exception as e:
-            logging.error(f"发送健康告警失败: {e}")
+            logging.error(f"记录健康状态失败: {e}")
 
     def record_api_call(self, success: bool = True):
         """记录API调用结果"""

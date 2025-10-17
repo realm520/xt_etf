@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 from enum import Enum
 
-from etf.alert import send_alert, AlertLevel
+# Alert system removed - using logging only
 
 logger = logging.getLogger(__name__)
 
@@ -282,26 +282,17 @@ class StopLossManager:
             "position_to_close": position_to_close
         }
         self.stop_loss_history.append(stop_loss_event)
-        
-        # 发送止损告警
-        await send_alert(
-            "stop_loss_triggered",
-            {
-                "event_type": "stop_loss",
-                "symbol": symbol,
-                "reason": stop_loss_reason,
-                "loss_rate": loss_rate,
-                "position": position.amount,
-                "action": action.value,
-                "position_to_close": position_to_close,
-                "entry_price": position.entry_price,
-                "current_price": position.current_price,
-                "holding_time_hours": (datetime.now() - position.entry_time).total_seconds() / 3600
-            },
-            strategy_name=self.strategy_name
-        )
-        
+
+        # 记录止损日志（告警已移除，使用日志记录）
         logger.warning(f"止损触发: {stop_loss_reason}, 动作: {action.value}")
+        logger.warning(f"  交易对: {symbol}")
+        logger.warning(f"  亏损率: {loss_rate:.2%}")
+        logger.warning(f"  持仓量: {position.amount:.6f}")
+        logger.warning(f"  平仓量: {position_to_close:.6f}")
+        logger.warning(f"  入场价: {position.entry_price:.4f}")
+        logger.warning(f"  当前价: {position.current_price:.4f}")
+        logger.warning(f"  持仓时间: {(datetime.now() - position.entry_time).total_seconds() / 3600:.2f}小时")
+        logger.warning(f"  策略: {self.strategy_name}")
         
         return StopLossResult(
             triggered=True,
