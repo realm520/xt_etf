@@ -4,8 +4,8 @@ from etf.market_making import MarketMaker
 from etf.order_manager import OrderManager
 from etf.xt import Spot
 from etf.stability_monitor import StabilityMonitor
+from etf.websocket import XTWebSocketClient
 from hedging import Hedge
-from etf.alert import send_direct_alert, AlertLevel, get_alert_manager
 from etf.observability import init_otel, MetricsCollector  # OpenTelemetry 集成
 import json
 import time
@@ -20,7 +20,7 @@ import asyncio
 
 logging.shutdown()
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # 改为 DEBUG 级别以显示 debug 日志
     format="%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s",
 )
 
@@ -32,17 +32,21 @@ class EtfStrategy:
 
     @staticmethod
     def run(config, risk_controller, wash_controller, market_maker, stability_monitor=None, depth=None):
-        try:
-            depth = risk_controller.get_depth_data(config["symbol"])
-            if stability_monitor:
-                stability_monitor.record_api_call(success=True)
-        except Exception as e:
-            logging.error(e)
-            logging.info("error with getting new depth, using history depth")
-            depth = risk_controller.depth
-            if stability_monitor:
-                stability_monitor.record_api_call(success=False)
-            pass  # using history depth
+        # 优先使用传入的 depth，避免重复 API 调用触发限流
+        if depth is None or (not depth.get("bids") and not depth.get("asks")):
+            try:
+                depth = risk_controller.get_depth_data(config["symbol"])
+                if stability_monitor:
+                    stability_monitor.record_api_call(success=True)
+                logging.info("获取新的 depth 数据成功")
+            except Exception as e:
+                logging.error(f"获取 depth 失败: {e}")
+                logging.info("使用历史 depth 数据")
+                depth = risk_controller.depth if risk_controller.depth else {"bids": [], "asks": []}
+                if stability_monitor:
+                    stability_monitor.record_api_call(success=False)
+        else:
+            logging.info("使用传入的 depth 数据，避免重复 API 调用")
 
         if config["cancel_all_open_orders"]:
             logging.info("cancel_all_open_orders")
@@ -106,7 +110,8 @@ class EtfStrategy:
                 # ✅ 风险监控：每次循环更新风险等级
                 if config["Enable_risk_controller"]:
                     try:
-                        risk_controller.risk_monitor(symbol=config["symbol"])
+                        # 将depth传递给risk_monitor，避免重复API调用
+                        risk_controller.risk_monitor(symbol=config["symbol"], depth_data=depth)
                         logging.info(f"风险等级: {risk_controller.risk_level}")
 
                         # 📊 记录风险等级指标
@@ -153,7 +158,7 @@ class EtfStrategy:
                         logging.warning(f"更新止损信息失败: {e}")
 
                 # ✅ 止损检查：异步检查是否触发止损
-                if risk_controller.stop_loss_manager and not risk_controller.is_in_cooldown:
+                if risk_controller.stop_loss_manager and risk_controller.is_stop_loss_active():
                     try:
                         # 创建新的事件循环来运行异步止损检查
                         loop = asyncio.new_event_loop()
@@ -372,49 +377,26 @@ def get_parser():
     return parser
 
 
-async def send_startup_alert(strategy_name: str, config: dict):
-    """发送程序启动告警"""
-    await send_direct_alert(
-        title=f"策略启动: {strategy_name}",
-        content=f"ETF 策略已启动\n环境: {config.get('env', 'unknown')}\n交易对: {config.get('symbol', 'unknown')}",
-        level=AlertLevel.INFO,
-        strategy_name=strategy_name,
-        details={
-            "event_type": "start",
-            "environment": config.get("env"),
-            "symbol": config.get("symbol"),
-            "leverage": config.get("leverage", "unknown"),
-            "hedging_enabled": config.get("Enable_hedging", False),
-            "wash_trading_enabled": config.get("Enable_wash_trading", False),
-            "risk_controller_enabled": config.get("Enable_risk_controller", False)
-        }
-    )
+def log_startup(strategy_name: str, config: dict):
+    """记录程序启动日志（替代告警）"""
+    logging.info("=" * 70)
+    logging.info(f"✅ 策略启动: {strategy_name}")
+    logging.info(f"   环境: {config.get('env', 'unknown')}")
+    logging.info(f"   交易对: {config.get('symbol', 'unknown')}")
+    logging.info(f"   杠杆: {config.get('leverage', 'unknown')}x")
+    logging.info(f"   对冲功能: {'启用' if config.get('Enable_hedging', False) else '禁用'}")
+    logging.info(f"   刷量功能: {'启用' if config.get('Enable_wash_trading', False) else '禁用'}")
+    logging.info(f"   风控功能: {'启用' if config.get('Enable_risk_controller', False) else '禁用'}")
+    logging.info("=" * 70)
 
 
-async def send_shutdown_alert(strategy_name: str, config: dict, reason: str = "正常退出"):
-    """发送程序停止告警"""
-    await send_direct_alert(
-        title=f"策略停止: {strategy_name}",
-        content=f"ETF 策略已停止\n原因: {reason}\n交易对: {config.get('symbol', 'unknown')}",
-        level=AlertLevel.INFO,
-        strategy_name=strategy_name,
-        details={
-            "event_type": "stop",
-            "reason": reason,
-            "symbol": config.get("symbol")
-        }
-    )
-
-
-def run_async_alert(coro):
-    """在新的事件循环中运行异步告警"""
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(coro)
-        loop.close()
-    except Exception as e:
-        logging.error(f"发送告警失败: {e}")
+def log_shutdown(strategy_name: str, config: dict, reason: str = "正常退出"):
+    """记录程序停止日志（替代告警）"""
+    logging.info("=" * 70)
+    logging.info(f"🛑 策略停止: {strategy_name}")
+    logging.info(f"   原因: {reason}")
+    logging.info(f"   交易对: {config.get('symbol', 'unknown')}")
+    logging.info("=" * 70)
 
 
 if __name__ == "__main__":
@@ -612,11 +594,40 @@ if __name__ == "__main__":
         logging.warning("系统将继续运行，但不会导出 Metrics")
         metrics_collector = None
 
+    # ===== 初始化 WebSocket 客户端（用于实时depth数据） =====
+    ws_client = None
+    enable_websocket = os.getenv("ENABLE_WEBSOCKET", "true").lower() == "true"
+
+    if enable_websocket:
+        try:
+            # XT public WebSocket 不需要认证，直接连接
+            ws_client = XTWebSocketClient(
+                symbol=config["symbol"]
+            )
+            ws_client.start()
+            logging.info(f"✅ WebSocket客户端已启动: {config['symbol']}")
+
+            # 等待WebSocket连接建立（最多5秒）
+            for i in range(10):
+                if ws_client.is_connected():
+                    logging.info("✅ WebSocket连接成功")
+                    break
+                time.sleep(0.5)
+            else:
+                logging.warning("WebSocket连接未在5秒内建立，将fallback到REST API")
+        except Exception as e:
+            logging.warning(f"WebSocket初始化失败: {e}，将使用REST API")
+            ws_client = None
+    else:
+        logging.info("⏸️ WebSocket已禁用 (ENABLE_WEBSOCKET=false)")
+
     logging.info("run RiskController")
-    risk_controller = RiskController(spot, risk_params, strategy_name=strategy_name)
+    risk_controller = RiskController(spot, risk_params, strategy_name=strategy_name, ws_client=ws_client)
+    depth = None  # 初始化 depth 变量，用于复用避免 API 限流
     if config["Enable_risk_controller"]:
         try:
             risk_controller.risk_monitor(symbol=config["symbol"])
+            depth = risk_controller.depth  # 保存获取到的 depth 数据
             logging.info(f"初始风险等级: {risk_controller.risk_level}")
         except (IndexError, Exception) as e:
             logging.warning(f"启动时风险监控失败（可能是空订单簿）: {e}")
@@ -632,22 +643,30 @@ if __name__ == "__main__":
     # 暂时只使用同步方法（update_last_active, record_api_call等）
     # 完整的异步监控将在 Phase 2 实现
     logging.info("稳定性监控器已初始化（仅同步模式）")
-    
-    # 发送启动告警
-    run_async_alert(send_startup_alert(strategy_name, config))
+
+    # 记录启动日志（替代告警）
+    log_startup(strategy_name, config)
     
     # 注册退出处理函数
     def cleanup():
         """清理函数，在程序退出时执行"""
         try:
+            # 停止WebSocket连接
+            if 'ws_client' in locals() and ws_client:
+                try:
+                    ws_client.stop()
+                    logging.info("✅ WebSocket连接已关闭")
+                except Exception as e:
+                    logging.error(f"关闭WebSocket失败: {e}")
+
             # 停止稳定性监控
             if 'stability_monitor' in locals():
                 stability_monitor.stop_monitoring()
                 logging.info("稳定性监控已停止")
-            
-            # 发送停止告警
-            run_async_alert(send_shutdown_alert(strategy_name, config))
-            
+
+            # 记录停止日志（替代告警）
+            log_shutdown(strategy_name, config)
+
             # 撤销所有挂单
             if config.get("Exit_with_cancel_all_open_orders", True):
                 try:
@@ -655,14 +674,7 @@ if __name__ == "__main__":
                     logging.info("已撤销所有挂单")
                 except Exception as e:
                     logging.error(f"撤销挂单失败: {e}")
-                    
-            # 关闭告警管理器
-            alert_manager = get_alert_manager()
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(alert_manager.close())
-            loop.close()
-            
+
         except Exception as e:
             logging.error(f"清理过程出错: {e}")
             
@@ -687,7 +699,13 @@ if __name__ == "__main__":
         market_maker = MarketMaker(order_manager)
         wash_controller = WashController(order_manager, market_maker)
 
-        depth = risk_controller.get_depth_data(config["symbol"])
+        # 复用之前获取的 depth，避免短时间内重复 API 调用触发限流
+        if depth is None:
+            try:
+                depth = risk_controller.get_depth_data(config["symbol"])
+            except Exception as e:
+                logging.warning(f"获取 depth 失败: {e}，使用空 depth")
+                depth = {"bids": [], "asks": []}
         logging.info(depth)
 
         # market_maker.make_orders(symbol=config["symbol"])
@@ -715,4 +733,5 @@ if __name__ == "__main__":
     # if config["Enable_wash_trading"]:
     #     thread4.join()
     if config["Enable_market_making"]:
-        EtfStrategy.run(config, risk_controller, wash_controller, market_maker, stability_monitor)
+        # 传递 depth 参数，避免在 run 方法中重复调用 API
+        EtfStrategy.run(config, risk_controller, wash_controller, market_maker, stability_monitor, depth)
