@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
 
-from etf.alert import send_alert, AlertLevel
+from etf.alert import AlertLevel
 
 
 class ConnectionStatus(Enum):
@@ -158,7 +158,9 @@ class ConnectionHealthChecker:
                     self.circuit_breaker_open = True
                     self.circuit_breaker_reset_time = time.time() + 120  # 2分钟后重置
                     logging.error("连接严重异常，开启熔断器")
-                    asyncio.create_task(self._send_circuit_breaker_alert())
+                    # 记录熔断器告警（告警已移除，使用日志记录）
+                    logging.error(f"熔断器开启: 连续失败{self.metrics.consecutive_failures}次，错误率{self.metrics.error_rate:.2%}")
+                    logging.error(f"策略: {self.strategy_name}, 重置时间: {datetime.fromtimestamp(self.circuit_breaker_reset_time).isoformat()}")
             
         except Exception as e:
             logging.error(f"健康检查执行失败: {e}")
@@ -224,10 +226,27 @@ class ConnectionHealthChecker:
     def _handle_status_change(self, old_status: ConnectionStatus, new_status: ConnectionStatus):
         """处理状态变化"""
         logging.info(f"连接状态变化: {old_status.value} -> {new_status.value}")
-        
-        # 发送状态变化告警
-        asyncio.create_task(self._send_status_change_alert(old_status, new_status))
-        
+
+        # 记录状态变化（告警已移除，使用日志记录）
+        alert_level = "INFO"
+        if new_status == ConnectionStatus.FAILED:
+            alert_level = "CRITICAL"
+        elif new_status == ConnectionStatus.UNSTABLE:
+            alert_level = "ERROR"
+        elif new_status == ConnectionStatus.DEGRADED:
+            alert_level = "WARNING"
+
+        logging.log(
+            logging.CRITICAL if alert_level == "CRITICAL" else
+            logging.ERROR if alert_level == "ERROR" else
+            logging.WARNING if alert_level == "WARNING" else logging.INFO,
+            f"连接状态变化告警: {old_status.value} -> {new_status.value}"
+        )
+        logging.info(f"  成功率: {self.metrics.success_rate:.2%}")
+        logging.info(f"  连续失败: {self.metrics.consecutive_failures}次")
+        logging.info(f"  平均响应时间: {self.metrics.average_response_time:.2f}秒")
+        logging.info(f"  策略: {self.strategy_name}")
+
         # 根据新状态执行相应操作
         if new_status == ConnectionStatus.DEGRADED:
             self._enter_degraded_mode()
@@ -258,47 +277,6 @@ class ConnectionHealthChecker:
         self.degraded_mode = False
         logging.info("连接恢复正常，退出降级模式")
 
-    async def _send_status_change_alert(self, old_status: ConnectionStatus, new_status: ConnectionStatus):
-        """发送状态变化告警"""
-        try:
-            alert_level = AlertLevel.INFO
-            if new_status == ConnectionStatus.FAILED:
-                alert_level = AlertLevel.CRITICAL
-            elif new_status == ConnectionStatus.UNSTABLE:
-                alert_level = AlertLevel.ERROR
-            elif new_status == ConnectionStatus.DEGRADED:
-                alert_level = AlertLevel.WARNING
-            
-            await send_alert(
-                "connection_status_change",
-                {
-                    "old_status": old_status.value,
-                    "new_status": new_status.value,
-                    "success_rate": f"{self.metrics.success_rate:.2%}",
-                    "consecutive_failures": self.metrics.consecutive_failures,
-                    "avg_response_time": f"{self.metrics.average_response_time:.2f}s",
-                    "strategy": self.strategy_name
-                },
-                strategy_name=self.strategy_name
-            )
-        except Exception as e:
-            logging.error(f"发送状态变化告警失败: {e}")
-
-    async def _send_circuit_breaker_alert(self):
-        """发送熔断器告警"""
-        try:
-            await send_alert(
-                "circuit_breaker_open",
-                {
-                    "consecutive_failures": self.metrics.consecutive_failures,
-                    "error_rate": f"{self.metrics.error_rate:.2%}",
-                    "reset_time": datetime.fromtimestamp(self.circuit_breaker_reset_time).isoformat(),
-                    "strategy": self.strategy_name
-                },
-                strategy_name=self.strategy_name
-            )
-        except Exception as e:
-            logging.error(f"发送熔断器告警失败: {e}")
 
     def is_connection_healthy(self) -> bool:
         """检查连接是否健康"""

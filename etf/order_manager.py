@@ -3,6 +3,8 @@ import random
 import logging
 import pandas as pd
 import os
+import json
+import redis
 from datetime import datetime, timezone, timedelta
 from copy import deepcopy
 import asyncio
@@ -10,6 +12,11 @@ from typing import Optional, Dict, Any, List
 from functools import wraps
 from etf.alert import send_alert, AlertLevel
 from etf.utils.common import get_mid_price
+from etf.utils.order_errors import (
+    is_permanent_error,
+    get_error_description,
+    get_blacklist_ttl,
+)
 
 # 导入订单记录器
 try:
@@ -54,22 +61,10 @@ def handle_api_error(func):
             error_type = type(e).__name__
             error_msg = str(e)
             
-            # 记录API错误
+            # 记录API错误（告警已移除，使用日志记录）
             logging.error(f"API错误 {func.__name__}: {error_type} - {error_msg}")
-            
-            # 发送告警（如果strategy_name存在）
-            if hasattr(self, 'strategy_name'):
-                asyncio.create_task(send_alert(
-                    "api_error",
-                    {
-                        "error_type": error_type,
-                        "error_message": error_msg,
-                        "function": func.__name__,
-                        "operation": "order_management"
-                    },
-                    strategy_name=self.strategy_name
-                ))
-            
+            logging.error(f"策略: {getattr(self, 'strategy_name', 'unknown')}, 操作: order_management")
+
             # 根据错误类型决定是否重试
             if "rate limit" in error_msg.lower() or "too many requests" in error_msg.lower():
                 logging.warning("遇到限频错误，等待后重试")
@@ -157,6 +152,20 @@ class OrderManager:
         self.consecutive_failures = 0
         self.circuit_breaker_open = False
         self.circuit_breaker_reset_time = None
+
+        # 初始化 Redis 连接用于黑名单管理
+        try:
+            self.redis_client = redis.Redis(
+                host='localhost',
+                port=6379,
+                db=0,
+                decode_responses=True
+            )
+            self.redis_client.ping()  # 测试连接
+            logging.info("Redis 连接成功，黑名单功能已启用")
+        except Exception as e:
+            logging.warning(f"Redis 连接失败，黑名单功能将被禁用: {e}")
+            self.redis_client = None
     
     def _check_circuit_breaker(self):
         """检查熔断器状态"""
@@ -183,12 +192,126 @@ class OrderManager:
         """记录API失败操作"""
         self.api_error_count += 1
         self.consecutive_failures += 1
-        
+
         # 如果连续失败次数过多，开启熔断器
         if self.consecutive_failures >= 5:
             self.circuit_breaker_open = True
             self.circuit_breaker_reset_time = time.time() + 60  # 60秒后重置
             logging.error(f"连续失败{self.consecutive_failures}次，开启熔断器60秒")
+
+    def _add_to_blacklist(self, symbol: str, error_code: str, ttl: Optional[int] = None):
+        """
+        将交易对添加到黑名单
+
+        Args:
+            symbol: 交易对符号
+            error_code: 错误码
+            ttl: 黑名单过期时间（秒），None 则使用默认值
+        """
+        if not self.redis_client:
+            return
+
+        try:
+            # 使用默认 TTL
+            if ttl is None:
+                ttl = get_blacklist_ttl(error_code)
+
+            # 构建黑名单键
+            blacklist_key = f"order_blacklist:{symbol}"
+
+            # 准备黑名单数据
+            blacklist_data = {
+                "reason": error_code,
+                "description": get_error_description(error_code),
+                "timestamp": time.time(),
+                "strategy": self.strategy_name
+            }
+
+            # 存储到 Redis
+            self.redis_client.setex(
+                blacklist_key,
+                ttl,
+                json.dumps(blacklist_data)
+            )
+
+            logging.info(
+                f"交易对 {symbol} 已加入黑名单: {error_code} - {blacklist_data['description']}, "
+                f"过期时间: {ttl}秒"
+            )
+
+        except Exception as e:
+            logging.error(f"添加黑名单失败: {e}")
+
+    def is_symbol_blacklisted(self, symbol: str) -> bool:
+        """
+        检查交易对是否在黑名单中
+
+        Args:
+            symbol: 交易对符号
+
+        Returns:
+            True 如果在黑名单中
+        """
+        if not self.redis_client:
+            return False
+
+        try:
+            blacklist_key = f"order_blacklist:{symbol}"
+            return self.redis_client.exists(blacklist_key) > 0
+        except Exception as e:
+            logging.error(f"检查黑名单失败: {e}")
+            return False
+
+    def get_blacklist_info(self, symbol: str) -> Dict[str, Any]:
+        """
+        获取交易对黑名单详细信息
+
+        Args:
+            symbol: 交易对符号
+
+        Returns:
+            黑名单信息字典，包含 reason, description, timestamp, remaining_seconds
+        """
+        if not self.redis_client:
+            return {}
+
+        try:
+            blacklist_key = f"order_blacklist:{symbol}"
+            data = self.redis_client.get(blacklist_key)
+
+            if not data:
+                return {}
+
+            blacklist_info = json.loads(data)
+
+            # 添加剩余时间
+            ttl = self.redis_client.ttl(blacklist_key)
+            blacklist_info["remaining_seconds"] = max(0, ttl)
+
+            return blacklist_info
+
+        except Exception as e:
+            logging.error(f"获取黑名单信息失败: {e}")
+            return {}
+
+    def clear_blacklist(self, symbol: str):
+        """
+        手动清除交易对黑名单
+
+        Args:
+            symbol: 交易对符号
+        """
+        if not self.redis_client:
+            return
+
+        try:
+            blacklist_key = f"order_blacklist:{symbol}"
+            if self.redis_client.delete(blacklist_key):
+                logging.info(f"已清除 {symbol} 的黑名单")
+            else:
+                logging.warning(f"{symbol} 不在黑名单中")
+        except Exception as e:
+            logging.error(f"清除黑名单失败: {e}")
 
     @handle_api_error
     def get_depth_data(self, symbol):
@@ -318,46 +441,76 @@ class OrderManager:
             self._record_api_failure()
             raise
 
-        # 记录批量订单
-        if response and response.get("items") and self.order_recorder:
-            try:
-                depth = self.depth if hasattr(self, "depth") else None
+        # 处理批量订单响应
+        if response and response.get("items"):
+            # 检查被拒绝的订单
+            for i, item in enumerate(response["items"]):
+                if item.get("rejected"):
+                    error_code = item.get("reason")
+                    original_order = order_data[i]
+                    symbol = original_order["symbol"]
 
-                for i, item in enumerate(response["items"]):
-                    if not item.get("rejected"):
-                        original_order = order_data[i]
+                    # 检查是否为永久性错误
+                    if is_permanent_error(error_code):
+                        # 添加到黑名单
+                        self._add_to_blacklist(symbol, error_code)
 
-                        record_data = {
-                            "symbol": original_order["symbol"],
-                            "order_id": item.get("orderId", ""),
-                            "client_order_id": original_order.get("clientOrderId", ""),
-                            "side": original_order["side"],
-                            "order_type": original_order.get("type", "LIMIT"),
-                            "price": float(original_order["price"]),
-                            "quantity": float(original_order["quantity"]),
-                            "status": "NEW",
-                            "strategy_name": self.strategy_name,
-                            "is_wash_trading": is_wash_trading,
-                            "net_value": float(self.netvalue)
-                            if self.netvalue
-                            else None,
-                            "best_bid": float(depth["bids"][0][0])
-                            if depth and depth.get("bids")
-                            else None,
-                            "best_ask": float(depth["asks"][0][0])
-                            if depth and depth.get("asks")
-                            else None,
-                            "timestamp": datetime.now(timezone.utc),
-                            "batch_id": response.get("batchId"),
-                        }
-
-                        # 异步记录订单
-                        asyncio.create_task(
-                            self.order_recorder.record_order(record_data)
+                        # 记录永久性错误
+                        logging.error(
+                            f"永久性错误: {error_code} - {get_error_description(error_code)}, "
+                            f"交易对: {symbol}, "
+                            f"侧: {original_order['side']}, "
+                            f"价格: {original_order['price']}, "
+                            f"数量: {original_order['quantity']}"
+                        )
+                    else:
+                        # 临时性错误或未知错误，只记录警告
+                        logging.warning(
+                            f"订单被拒绝: {error_code} - {get_error_description(error_code)}, "
+                            f"交易对: {symbol}, "
+                            f"可能可以重试"
                         )
 
-            except Exception as e:
-                logging.error(f"记录批量订单失败: {e}")
+            # 记录成功的订单
+            if self.order_recorder:
+                try:
+                    depth = self.depth if hasattr(self, "depth") else None
+
+                    for i, item in enumerate(response["items"]):
+                        if not item.get("rejected"):
+                            original_order = order_data[i]
+
+                            record_data = {
+                                "symbol": original_order["symbol"],
+                                "order_id": item.get("orderId", ""),
+                                "client_order_id": original_order.get("clientOrderId", ""),
+                                "side": original_order["side"],
+                                "order_type": original_order.get("type", "LIMIT"),
+                                "price": float(original_order["price"]),
+                                "quantity": float(original_order["quantity"]),
+                                "status": "NEW",
+                                "strategy_name": self.strategy_name,
+                                "is_wash_trading": is_wash_trading,
+                                "net_value": float(self.netvalue)
+                                if self.netvalue
+                                else None,
+                                "best_bid": float(depth["bids"][0][0])
+                                if depth and depth.get("bids")
+                                else None,
+                                "best_ask": float(depth["asks"][0][0])
+                                if depth and depth.get("asks")
+                                else None,
+                                "timestamp": datetime.now(timezone.utc),
+                                "batch_id": response.get("batchId"),
+                            }
+
+                            # 异步记录订单
+                            asyncio.create_task(
+                                self.order_recorder.record_order(record_data)
+                            )
+
+                except Exception as e:
+                    logging.error(f"记录批量订单失败: {e}")
 
         # {'batchId': '449413067009423616', 'items': [{'index': 0, 'clientOrderId': '16559590087220001', 'orderId': '449413067009423617', 'rejected': False, 'reason': None}]}
 
