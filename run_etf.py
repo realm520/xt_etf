@@ -506,10 +506,16 @@ if __name__ == "__main__":
         config["strategy_name"] = args.strategy
 
     if config["env"] == "qa":
+        # QA 环境从 .env 文件读取 API 密钥
+        import os
+        from dotenv import load_dotenv
+        
+        load_dotenv()
+        
         spot = Spot(
-            host="https://sapi.xt-qa.com",
-            access_key="be3466e5-365c-4471-a368-7c425fd5dd61",
-            secret_key="9ca42e6db6c35f0ca5f3541737b044c4e3d5abb2",
+            host="https://sapi.xt-qa2.com",  # XT QA2 测试环境
+            access_key=os.getenv("access_key"),
+            secret_key=os.getenv("secret_key"),
         )
 
     elif config["env"] == "prod":
