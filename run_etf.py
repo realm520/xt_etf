@@ -260,7 +260,7 @@ def get_parser():
     parser.add_argument(
         "--strategy",
         type=str,
-        choices=["stg3l", "stg3s", "stg5l", "stg5s"],
+        choices=["ton3l", "stg3l", "stg3s", "stg5l", "stg5s"],
         help="Use predefined strategy from config file.",
     )
     parser.add_argument(
