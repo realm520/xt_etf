@@ -5,6 +5,7 @@ from etf.order_manager import OrderManager
 from etf.xt import Spot
 from etf.stability_monitor import StabilityMonitor
 from etf.websocket import XTWebSocketClient
+from etf.symbol_config import SymbolConfigManager  # Symbol配置管理器
 from hedging import Hedge
 from etf.observability import init_otel, MetricsCollector  # OpenTelemetry 集成
 import json
@@ -634,6 +635,29 @@ if __name__ == "__main__":
     else:
         logging.info("⏸️ WebSocket已禁用 (ENABLE_WEBSOCKET=false)")
 
+    # ===== 初始化 Symbol 配置管理器（用于动态获取精度配置） =====
+    symbol_config_manager = None
+    try:
+        symbol_config_manager = SymbolConfigManager(
+            spot_client=spot,
+            refresh_interval=3600  # 每小时刷新一次配置
+        )
+
+        # 加载当前交易对的配置
+        if symbol_config_manager.load_symbol_config(config["symbol"]):
+            logging.info(f"✅ Symbol配置管理器初始化成功: {config['symbol']}")
+
+            # 启动自动刷新线程
+            symbol_config_manager.start_auto_refresh()
+            logging.info("✅ Symbol配置自动刷新已启动")
+        else:
+            logging.warning(f"⚠️ 无法加载 {config['symbol']} 配置，将使用YAML配置")
+            symbol_config_manager = None
+    except Exception as e:
+        logging.error(f"❌ Symbol配置管理器初始化失败: {e}")
+        logging.warning("系统将使用YAML配置的精度参数")
+        symbol_config_manager = None
+
     logging.info("run RiskController")
     risk_controller = RiskController(spot, risk_params, strategy_name=strategy_name, ws_client=ws_client)
     depth = None  # 初始化 depth 变量，用于复用避免 API 限流
@@ -647,8 +671,8 @@ if __name__ == "__main__":
             logging.info("使用默认风险等级，主循环中将继续监控")
 
     # market maker related
-    # 传递策略名称给 OrderManager
-    order_manager = OrderManager(spot, strategy_name=strategy_name)
+    # 传递策略名称和Symbol配置管理器给 OrderManager
+    order_manager = OrderManager(spot, strategy_name=strategy_name, symbol_config=symbol_config_manager)
     
     # 初始化稳定性监控
     stability_monitor = StabilityMonitor(strategy_name=strategy_name, check_interval=60)
@@ -664,8 +688,16 @@ if __name__ == "__main__":
     def cleanup():
         """清理函数，在程序退出时执行"""
         try:
+            # 停止Symbol配置管理器
+            if symbol_config_manager:
+                try:
+                    symbol_config_manager.stop_auto_refresh()
+                    logging.info("✅ Symbol配置管理器已停止")
+                except Exception as e:
+                    logging.error(f"停止Symbol配置管理器失败: {e}")
+
             # 停止WebSocket连接
-            if 'ws_client' in locals() and ws_client:
+            if ws_client:
                 try:
                     ws_client.stop()
                     logging.info("✅ WebSocket连接已关闭")

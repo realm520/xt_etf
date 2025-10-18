@@ -104,10 +104,11 @@ class Order:
 
 
 class OrderManager:
-    def __init__(self, spot, strategy_name: str = "unknown"):
+    def __init__(self, spot, strategy_name: str = "unknown", symbol_config=None):
         self.counter = 0
         self.client = spot
         self.strategy_name = strategy_name  # 添加策略名称
+        self.symbol_config = symbol_config  # Symbol配置管理器
         self.last_position = 0
         self.position = 0
         self.amount = 0
@@ -145,7 +146,7 @@ class OrderManager:
             self._recorder_loop = None
         else:
             self.order_recorder = None
-        
+
         # 添加错误统计和健康检查
         self.api_error_count = 0
         self.last_successful_operation = time.time()
@@ -368,11 +369,35 @@ class OrderManager:
     ):
         if not self._check_circuit_breaker():
             return None
-            
+
+        # ✅ 格式化和验证订单参数（如果Symbol配置管理器可用）
+        if self.symbol_config and price is not None and quantity is not None:
+            original_price = price
+            original_quantity = quantity
+
+            # 格式化价格和数量
+            price = self.symbol_config.format_price(symbol, price)
+            quantity = self.symbol_config.format_quantity(symbol, quantity)
+
+            # 记录格式化结果
+            if abs(price - original_price) > 1e-10 or abs(quantity - original_quantity) > 1e-10:
+                logging.debug(
+                    f"订单参数格式化: "
+                    f"价格 {original_price} → {price}, "
+                    f"数量 {original_quantity} → {quantity}"
+                )
+
+            # 验证订单参数
+            is_valid, error_msg = self.symbol_config.validate_order(symbol, price, quantity)
+            if not is_valid:
+                logging.error(f"订单验证失败: {error_msg}")
+                logging.error(f"交易对: {symbol}, 侧: {side}, 价格: {price}, 数量: {quantity}")
+                return None
+
         order = Order(
             symbol=symbol, side=side, type=type, price=price, quantity=quantity
         )
-        
+
         try:
             response = self.client.order(
                 symbol=order.symbol,
@@ -431,7 +456,53 @@ class OrderManager:
     def add_orders_batch(self, order_data, batch_id=None, is_wash_trading=False):
         if not self._check_circuit_breaker():
             return None
-            
+
+        # ✅ 格式化和验证批量订单参数（如果Symbol配置管理器可用）
+        if self.symbol_config:
+            validated_orders = []
+            for i, order in enumerate(order_data):
+                symbol = order.get("symbol")
+                price = order.get("price")
+                quantity = order.get("quantity")
+
+                if symbol and price is not None and quantity is not None:
+                    original_price = price
+                    original_quantity = quantity
+
+                    # 格式化价格和数量
+                    formatted_price = self.symbol_config.format_price(symbol, price)
+                    formatted_quantity = self.symbol_config.format_quantity(symbol, quantity)
+
+                    # 记录格式化结果
+                    if abs(formatted_price - original_price) > 1e-10 or abs(formatted_quantity - original_quantity) > 1e-10:
+                        logging.debug(
+                            f"批量订单[{i}]格式化: "
+                            f"价格 {original_price} → {formatted_price}, "
+                            f"数量 {original_quantity} → {formatted_quantity}"
+                        )
+
+                    # 验证订单参数
+                    is_valid, error_msg = self.symbol_config.validate_order(symbol, formatted_price, formatted_quantity)
+                    if not is_valid:
+                        logging.warning(f"批量订单[{i}]验证失败: {error_msg}")
+                        logging.warning(f"跳过订单: {symbol}, 侧: {order.get('side')}, 价格: {formatted_price}, 数量: {formatted_quantity}")
+                        continue  # 跳过无效订单
+
+                    # 更新订单数据
+                    order["price"] = formatted_price
+                    order["quantity"] = formatted_quantity
+
+                validated_orders.append(order)
+
+            # 如果所有订单都无效，返回None
+            if not validated_orders:
+                logging.error("批量订单中没有有效订单，取消下单")
+                return None
+
+            # 使用验证后的订单
+            order_data = validated_orders
+            logging.info(f"批量订单验证完成: {len(order_data)}/{len(order_data)} 有效")
+
         time.sleep(0.1)
 
         try:
