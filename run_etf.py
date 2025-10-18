@@ -606,12 +606,19 @@ if __name__ == "__main__":
 
     if enable_websocket:
         try:
+            # 根据环境选择 WebSocket URL
+            if config["env"] == "qa":
+                ws_url = "wss://stream.xt-qa2.com/public"  # QA2 测试环境
+            else:
+                ws_url = "wss://stream.xt.com/public"     # 生产环境
+
             # XT public WebSocket 不需要认证，直接连接
             ws_client = XTWebSocketClient(
-                symbol=config["symbol"]
+                symbol=config["symbol"],
+                ws_url=ws_url  # ✅ 传递环境相关的 URL
             )
             ws_client.start()
-            logging.info(f"✅ WebSocket客户端已启动: {config['symbol']}")
+            logging.info(f"✅ WebSocket客户端已启动: {config['symbol']} @ {ws_url}")
 
             # 等待WebSocket连接建立（最多5秒）
             for i in range(10):
