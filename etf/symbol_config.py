@@ -362,6 +362,26 @@ class SymbolConfigManager:
 
         return self._config_cache.get(symbol)
 
+    def get_min_order_value(self, symbol: str) -> Optional[float]:
+        """
+        获取最小订单金额（QUOTE_QTY filter 的 min 值）
+
+        Args:
+            symbol: 交易对名称
+
+        Returns:
+            float: 最小订单金额（USDT），如果未配置则返回 None
+        """
+        if symbol not in self._config_cache:
+            if not self.load_symbol_config(symbol):
+                return None
+
+        config = self._config_cache[symbol]
+        quote_qty_filter = config["filters"].get("QUOTE_QTY", {})
+        min_quote_qty = quote_qty_filter.get("min")
+
+        return float(min_quote_qty) if min_quote_qty is not None else None
+
     def __enter__(self):
         """上下文管理器支持"""
         self.start_auto_refresh()

@@ -8,6 +8,7 @@ import redis
 from datetime import datetime, timezone, timedelta
 from copy import deepcopy
 import asyncio
+import threading
 from typing import Optional, Dict, Any, List
 from functools import wraps
 from etf.alert import send_alert, AlertLevel
@@ -143,7 +144,11 @@ class OrderManager:
         # 初始化订单记录器
         if ORDER_RECORDER_AVAILABLE:
             self.order_recorder = get_order_recorder()
+            # 创建后台事件循环线程用于异步操作
             self._recorder_loop = None
+            self._recorder_thread = None
+            self._recorder_running = False
+            self._init_recorder_loop()
         else:
             self.order_recorder = None
 
@@ -167,7 +172,73 @@ class OrderManager:
         except Exception as e:
             logging.warning(f"Redis 连接失败，黑名单功能将被禁用: {e}")
             self.redis_client = None
-    
+
+    def _init_recorder_loop(self):
+        """初始化后台事件循环用于异步操作"""
+        def _run_loop():
+            """在独立线程中运行事件循环"""
+            self._recorder_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._recorder_loop)
+            self._recorder_running = True
+            logging.info("订单记录器后台事件循环已启动")
+
+            try:
+                self._recorder_loop.run_forever()
+            finally:
+                self._recorder_loop.close()
+                logging.info("订单记录器后台事件循环已关闭")
+
+        # 启动后台线程
+        self._recorder_thread = threading.Thread(
+            target=_run_loop,
+            daemon=True,
+            name="OrderRecorderLoop"
+        )
+        self._recorder_thread.start()
+
+        # 等待循环就绪
+        max_wait = 5  # 最多等待5秒
+        waited = 0
+        while not self._recorder_running and waited < max_wait:
+            time.sleep(0.1)
+            waited += 0.1
+
+        if not self._recorder_running:
+            logging.warning("订单记录器后台循环启动超时")
+
+    def _schedule_async(self, coro):
+        """
+        线程安全地调度异步操作
+
+        Args:
+            coro: 协程对象
+        """
+        if not self._recorder_loop or not self._recorder_running:
+            logging.warning("订单记录器后台循环未就绪，跳过记录")
+            return
+
+        try:
+            # 使用 call_soon_threadsafe 在另一个线程的事件循环中安全调度任务
+            asyncio.run_coroutine_threadsafe(coro, self._recorder_loop)
+        except Exception as e:
+            logging.error(f"调度异步任务失败: {e}")
+
+    def shutdown_recorder(self):
+        """优雅关闭订单记录器"""
+        if not self._recorder_loop or not self._recorder_running:
+            return
+
+        logging.info("正在关闭订单记录器...")
+        self._recorder_running = False
+
+        if self._recorder_loop:
+            self._recorder_loop.call_soon_threadsafe(self._recorder_loop.stop)
+
+        if self._recorder_thread and self._recorder_thread.is_alive():
+            self._recorder_thread.join(timeout=3)
+
+        logging.info("订单记录器已关闭")
+
     def _check_circuit_breaker(self):
         """检查熔断器状态"""
         if self.circuit_breaker_open:
@@ -444,8 +515,8 @@ class OrderManager:
                     "timestamp": datetime.now(timezone.utc),
                 }
 
-                # 异步记录订单
-                asyncio.create_task(self.order_recorder.record_order(order_data))
+                # 使用线程安全的方式调度异步记录
+                self._schedule_async(self.order_recorder.record_order(order_data))
 
             except Exception as e:
                 logging.error(f"记录订单失败: {e}")
@@ -484,15 +555,51 @@ class OrderManager:
                     # 验证订单参数
                     is_valid, error_msg = self.symbol_config.validate_order(symbol, formatted_price, formatted_quantity)
                     if not is_valid:
-                        logging.warning(f"批量订单[{i}]验证失败: {error_msg}")
-                        logging.warning(f"跳过订单: {symbol}, 侧: {order.get('side')}, 价格: {formatted_price}, 数量: {formatted_quantity}")
-                        continue  # 跳过无效订单
+                        # 检查是否是订单金额不足的问题
+                        if "订单金额低于最小值" in error_msg:
+                            # 获取最小订单金额
+                            min_order_value = self.symbol_config.get_min_order_value(symbol)
 
-                    # 更新订单数据
+                            if min_order_value:
+                                # 计算满足最小金额所需的数量，增加20%余量确保格式化后仍满足要求
+                                adjusted_quantity = (min_order_value / formatted_price) * 1.2
+
+                                # 格式化调整后的数量
+                                new_quantity = self.symbol_config.format_quantity(symbol, adjusted_quantity)
+
+                                # 重新验证调整后的订单
+                                is_valid_new, error_msg_new = self.symbol_config.validate_order(
+                                    symbol, formatted_price, new_quantity
+                                )
+
+                                if is_valid_new:
+                                    # 调整成功，更新订单数量
+                                    order["price"] = formatted_price
+                                    order["quantity"] = new_quantity
+                                    logging.info(
+                                        f"批量订单[{i}]数量自动调整: {original_quantity} → {new_quantity} "
+                                        f"(订单金额: {formatted_price * original_quantity:.2f} → {formatted_price * new_quantity:.2f} USDT)"
+                                    )
+                                    validated_orders.append(order)
+                                    continue
+                                else:
+                                    # 调整后仍不满足要求，跳过
+                                    logging.warning(f"批量订单[{i}]调整后仍验证失败: {error_msg_new}")
+                                    continue
+                            else:
+                                # 无法获取最小订单金额，跳过
+                                logging.warning(f"批量订单[{i}]验证失败且无法调整: {error_msg}")
+                                continue
+                        else:
+                            # 其他验证错误，直接跳过
+                            logging.warning(f"批量订单[{i}]验证失败: {error_msg}")
+                            logging.warning(f"跳过订单: {symbol}, 侧: {order.get('side')}, 价格: {formatted_price}, 数量: {formatted_quantity}")
+                            continue
+
+                    # 更新订单数据（仅在验证通过时）
                     order["price"] = formatted_price
                     order["quantity"] = formatted_quantity
-
-                validated_orders.append(order)
+                    validated_orders.append(order)
 
             # 如果所有订单都无效，返回None
             if not validated_orders:
@@ -575,8 +682,8 @@ class OrderManager:
                                 "batch_id": response.get("batchId"),
                             }
 
-                            # 异步记录订单
-                            asyncio.create_task(
+                            # 使用线程安全的方式调度异步记录
+                            self._schedule_async(
                                 self.order_recorder.record_order(record_data)
                             )
 
@@ -815,7 +922,8 @@ class OrderManager:
         if self.order_recorder:
             trade_data["strategy_name"] = self.strategy_name
             trade_data["is_wash_trading"] = is_wash_trading
-            asyncio.create_task(self.order_recorder.record_trade(trade_data))
+            # 使用线程安全的方式调度异步记录
+            self._schedule_async(self.order_recorder.record_trade(trade_data))
 
         self.canceled_orders = []
         self.filled_orders = []

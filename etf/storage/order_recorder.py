@@ -160,7 +160,9 @@ class OrderRecorder:
         """更新Redis中的订单缓存"""
         try:
             # 存储最新订单信息
-            key = f"order:{order_data['symbol']}:{order_data['orderId']}"
+            # 支持两种键名：order_id（下划线）和 orderId（驼峰）
+            order_id = order_data.get('order_id') or order_data.get('orderId', '')
+            key = f"order:{order_data['symbol']}:{order_id}"
             await self.redis.hset(
                 key,
                 mapping={
