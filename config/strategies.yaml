@@ -28,7 +28,7 @@ strategies:
     Enable_wash_trading: true
     Enable_hedging: false
     Enable_market_making: true
-    cancel_all_open_orders: false
+    cancel_all_open_orders: true
     pre_make_orders: false
     Exit_with_cancel_all_open_orders: false
 

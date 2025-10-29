@@ -144,6 +144,24 @@ class StopLossManager:
                 
     def calculate_pnl_rate(self, position: PositionInfo) -> float:
         """计算盈亏率"""
+        # ⚡ 防止入场价或当前价异常导致计算错误
+        if position.entry_price <= 0 or position.current_price <= 0:
+            logger.warning(
+                f"⚠️ 价格数据异常: symbol={position.symbol}, "
+                f"entry={position.entry_price:.4f}, current={position.current_price:.4f}"
+            )
+            return 0.0
+
+        # ⚡ 防止价格偏差过大(超过10倍)导致误触发
+        price_ratio = max(position.entry_price, position.current_price) / min(position.entry_price, position.current_price)
+        if price_ratio > 10.0:
+            logger.warning(
+                f"⚠️ 价格偏差异常: symbol={position.symbol}, "
+                f"entry={position.entry_price:.4f}, current={position.current_price:.4f}, "
+                f"ratio={price_ratio:.2f}倍, 返回0避免误触发止损"
+            )
+            return 0.0  # 返回0避免误触发止损
+
         if position.side == 'long':
             return (position.current_price - position.entry_price) / position.entry_price
         else:  # short
@@ -225,7 +243,56 @@ class StopLossManager:
                 loss_rate=0.0,
                 position_to_close=0.0
             )
-            
+
+        # ⚡ 价格合理性检查：防止价格数据异常导致虚假止损触发
+        # 检查当前价格相对于入场价的变化幅度
+        price_change_rate = abs(position.current_price - position.entry_price) / position.entry_price
+        if price_change_rate > 0.15:  # 单次变化超过15%视为异常
+            logger.warning(
+                f"⚠️ 价格异常波动检测: symbol={position.symbol}, "
+                f"entry={position.entry_price:.4f}, current={position.current_price:.4f}, "
+                f"change={price_change_rate:.2%} (阈值15%), 跳过本次止损检查"
+            )
+            return StopLossResult(
+                triggered=False,
+                action=StopLossAction.NONE,
+                reason=f"价格异常波动 {price_change_rate:.2%}，跳过止损检查",
+                loss_rate=0.0,
+                position_to_close=0.0
+            )
+
+        # 额外检查：防止最高价/最低价与当前价偏差过大（用于移动止损保护）
+        if position.side == 'long':
+            price_deviation = abs(position.highest_price - position.current_price) / max(position.highest_price, 0.0001)
+            if price_deviation > 0.20:  # 与最高价偏差超过20%
+                logger.warning(
+                    f"⚠️ 价格偏离最高价过大: symbol={position.symbol}, "
+                    f"highest={position.highest_price:.4f}, current={position.current_price:.4f}, "
+                    f"deviation={price_deviation:.2%}, 跳过本次止损检查"
+                )
+                return StopLossResult(
+                    triggered=False,
+                    action=StopLossAction.NONE,
+                    reason=f"价格偏离最高价 {price_deviation:.2%}，跳过止损检查",
+                    loss_rate=0.0,
+                    position_to_close=0.0
+                )
+        else:  # short
+            price_deviation = abs(position.current_price - position.lowest_price) / max(position.lowest_price, 0.0001)
+            if price_deviation > 0.20:  # 与最低价偏差超过20%
+                logger.warning(
+                    f"⚠️ 价格偏离最低价过大: symbol={position.symbol}, "
+                    f"lowest={position.lowest_price:.4f}, current={position.current_price:.4f}, "
+                    f"deviation={price_deviation:.2%}, 跳过本次止损检查"
+                )
+                return StopLossResult(
+                    triggered=False,
+                    action=StopLossAction.NONE,
+                    reason=f"价格偏离最低价 {price_deviation:.2%}，跳过止损检查",
+                    loss_rate=0.0,
+                    position_to_close=0.0
+                )
+
         # 检查各种止损条件
         stop_loss_triggered = False
         stop_loss_reason = ""

@@ -8,6 +8,7 @@ from etf.websocket import XTWebSocketClient
 from etf.symbol_config import SymbolConfigManager  # Symbol配置管理器
 from hedging import Hedge
 from etf.observability import init_otel, MetricsCollector  # OpenTelemetry 集成
+from etf.utils.logger import setup_logging  # 新增：统一日志配置工具
 import json
 import time
 import logging
@@ -19,6 +20,7 @@ import yaml
 import os
 import asyncio
 
+# 暂时使用基础配置，等策略名称确定后会重新配置
 logging.shutdown()
 logging.basicConfig(
     level=logging.DEBUG,  # 改为 DEBUG 级别以显示 debug 日志
@@ -140,10 +142,55 @@ class EtfStrategy:
                             symbol_lower = config["symbol"].lower()
                             side = "short" if symbol_lower.endswith("s_usdt") else "long"
 
-                            # 获取入场价格（使用初始金额计算平均入场价）
-                            if order_manager.init_amount and order_manager.init_amount != 0:
-                                entry_price = (position - order_manager.init_amount * mid_price) / delta_amt if delta_amt != 0 else mid_price
+                            # ⚡ 改进的入场价计算逻辑
+                            # 1. 首先检查 delta_amt 是否足够大，避免除以极小数
+                            MIN_DELTA_AMT_THRESHOLD = 0.05  # 最小持仓量阈值，低于此值不计算入场价
+
+                            if order_manager.init_amount and order_manager.init_amount != 0 and abs(delta_amt) >= MIN_DELTA_AMT_THRESHOLD:
+                                # delta_amt 足够大，可以安全计算入场价
+                                calculated_entry = (position - order_manager.init_amount * mid_price) / delta_amt
+
+                                # 2. 多重价格合理性检查
+                                # 检查1: 入场价必须为正数
+                                if calculated_entry <= 0:
+                                    logging.warning(
+                                        f"⚠️ 入场价计算结果为负或零: calculated={calculated_entry:.4f}, "
+                                        f"使用当前价 {mid_price:.4f} 作为入场价"
+                                    )
+                                    entry_price = mid_price
+                                else:
+                                    # 检查2: 入场价不应偏离当前价超过 ±30% (从50%降至30%，更严格)
+                                    price_deviation = abs(calculated_entry - mid_price) / mid_price if mid_price != 0 else float('inf')
+                                    if price_deviation > 0.30:  # 30% 阈值
+                                        logging.warning(
+                                            f"⚠️ 入场价偏差过大: calculated={calculated_entry:.4f}, "
+                                            f"mid_price={mid_price:.4f}, deviation={price_deviation:.2%} (阈值30%), "
+                                            f"delta_amt={delta_amt:.6f}, position={position:.2f}, "
+                                            f"init_amt={order_manager.init_amount:.2f}, 使用当前价作为入场价"
+                                        )
+                                        entry_price = mid_price  # 回退到安全值
+                                    else:
+                                        # 通过所有检查，使用计算的入场价
+                                        entry_price = abs(calculated_entry)
+                                        logging.debug(
+                                            f"✅ 入场价计算正常: entry={entry_price:.4f}, "
+                                            f"current={mid_price:.4f}, deviation={price_deviation:.2%}"
+                                        )
                             else:
+                                # delta_amt 太小或 init_amount 无效，直接使用当前价
+                                if abs(delta_amt) < MIN_DELTA_AMT_THRESHOLD:
+                                    logging.info(
+                                        f"ℹ️ 持仓量过小 ({abs(delta_amt):.6f} < {MIN_DELTA_AMT_THRESHOLD}), "
+                                        f"使用当前价 {mid_price:.4f} 作为入场价"
+                                    )
+                                entry_price = mid_price
+
+                            # 3. 最终安全检查：确保 entry_price 为正数且合理
+                            if entry_price <= 0 or entry_price > mid_price * 2 or entry_price < mid_price * 0.5:
+                                logging.error(
+                                    f"🚨 入场价最终检查失败: entry={entry_price:.4f}, "
+                                    f"current={mid_price:.4f}, 强制使用当前价"
+                                )
                                 entry_price = mid_price
 
                             # 更新止损管理器的持仓信息
@@ -154,7 +201,10 @@ class EtfStrategy:
                                 entry_price=abs(entry_price),
                                 current_price=mid_price
                             )
-                            logging.debug(f"止损管理器已更新: side={side}, amount={abs(delta_amt):.4f}, entry={abs(entry_price):.4f}, current={mid_price:.4f}")
+                            logging.debug(
+                                f"📊 止损管理器已更新: symbol={config['symbol']}, side={side}, "
+                                f"amount={abs(delta_amt):.4f}, entry={abs(entry_price):.4f}, current={mid_price:.4f}"
+                            )
                     except Exception as e:
                         logging.warning(f"更新止损信息失败: {e}")
 
@@ -576,6 +626,23 @@ if __name__ == "__main__":
 
     # 定义策略名称（在使用前定义）
     strategy_name = config.get("strategy_name", config.get("prefix", "unknown"))
+
+    # ===== 初始化完整日志配置 =====
+    # 现在策略名称已确定，配置专业的日志系统（文件 + 控制台）
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_level_value = getattr(logging, log_level, logging.INFO)
+
+    setup_logging(
+        strategy_name=strategy_name,
+        log_level=log_level_value,
+        log_dir="logs",
+        enable_console=True,
+        enable_file=True,
+        enable_error_file=True,
+        max_bytes=10 * 1024 * 1024,  # 10MB
+        backup_count=7,
+        retention_days=30,
+    )
 
     # ===== 初始化 OpenTelemetry 可观测性 =====
     try:

@@ -325,27 +325,27 @@ class RiskController:
                 current_price=current_price
             )
             
-    async def check_stop_loss(self, symbol: str) -> Optional[Dict]:
+    async def check_stop_loss(self, symbol: str):
         """
         检查止损条件
-        
+
         Returns:
-            如果触发止损，返回止损结果；否则返回 None
+            StopLossResult对象，包含止损检查结果
         """
         if not self.stop_loss_manager:
-            return None
-            
+            # 返回未触发的止损结果
+            from etf.risk.stop_loss import StopLossResult
+            return StopLossResult(
+                triggered=False,
+                action=StopLossAction.NONE,
+                reason="止损管理器未启用",
+                loss_rate=0.0,
+                position_to_close=0.0
+            )
+
+        # 直接返回 StopLossResult 对象
         result = await self.stop_loss_manager.check_stop_loss(symbol)
-        
-        if result.triggered:
-            return {
-                "action": result.action,
-                "reason": result.reason,
-                "loss_rate": result.loss_rate,
-                "position_to_close": result.position_to_close
-            }
-            
-        return None
+        return result
         
     def is_stop_loss_active(self) -> bool:
         """检查止损是否处于活动状态（非冷却期）"""
