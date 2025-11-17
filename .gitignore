@@ -94,7 +94,8 @@ dmypy.json
 # PM2
 pm2.log
 
-# 临时文件
+# 临时文件和日志
+nohup.out
 *.tmp
 *.bak
 *.orig
