@@ -44,7 +44,7 @@ class MarketMaker:
     def __init__(self, order_manager: Any) -> None:
         """
         初始化做市商
-        
+
         Args:
             order_manager: 订单管理器实例，用于执行订单操作
         """
@@ -52,10 +52,74 @@ class MarketMaker:
         self.best_sell: float = 0.0
         self.best_buy: float = 0.0
         self.r: redis.Redis = redis.Redis(
-            host=DEFAULT_REDIS_HOST, 
-            port=DEFAULT_REDIS_PORT, 
+            host=DEFAULT_REDIS_HOST,
+            port=DEFAULT_REDIS_PORT,
             db=DEFAULT_REDIS_DB
         )
+        # 记录当前周期新增的反针对订单ID，用于避免误删
+        self.current_anti_pin_order_ids: List[str] = []
+
+    def _cancel_old_anti_pin_orders(
+        self,
+        symbol: str,
+        anti_pin_price_sell: float,
+        anti_pin_price_buy: float,
+        exclude_order_ids: List[str]
+    ) -> None:
+        """
+        取消旧的反针对订单（排除新添加的订单）
+
+        通过价格特征识别反针对订单，排除新添加的订单ID，批量取消旧的反针对订单
+
+        Args:
+            symbol: 交易对符号
+            anti_pin_price_sell: 反针对卖单价格
+            anti_pin_price_buy: 反针对买单价格
+            exclude_order_ids: 需要排除的订单ID列表（新添加的订单）
+        """
+        try:
+            # 获取当前所有活跃订单
+            current_orders = self.order_manager.client.get_open_orders(symbol=symbol)
+
+            old_anti_pin_orders = []
+            price_tolerance = 0.0001  # 价格容差，用于浮点数比较
+
+            for order in current_orders:
+                order_price = float(order["price"])
+                client_order_id = order.get("clientOrderId", "")
+
+                # 跳过新添加的订单
+                if client_order_id in exclude_order_ids:
+                    continue
+
+                # 通过价格特征识别反针对订单
+                is_anti_pin_sell = (
+                    order["side"] == "SELL" and
+                    abs(order_price - anti_pin_price_sell) < price_tolerance
+                )
+                is_anti_pin_buy = (
+                    order["side"] == "BUY" and
+                    abs(order_price - anti_pin_price_buy) < price_tolerance
+                )
+
+                if is_anti_pin_sell or is_anti_pin_buy:
+                    old_anti_pin_orders.append(order)
+
+            # 批量取消旧的反针对订单
+            if old_anti_pin_orders:
+                logging.info(
+                    f"发现 {len(old_anti_pin_orders)} 个旧的反针对订单，准备取消"
+                )
+                try:
+                    self.order_manager.cancel_orders_batch(orders=old_anti_pin_orders)
+                    logging.info(f"成功取消 {len(old_anti_pin_orders)} 个旧的反针对订单")
+                except Exception as e:
+                    logging.error(f"取消旧反针对订单失败: {e}")
+            else:
+                logging.debug("没有发现需要取消的旧反针对订单")
+
+        except Exception as e:
+            logging.error(f"查询或取消旧反针对订单时出错: {e}")
 
     def make_orders(
         self,
@@ -262,10 +326,14 @@ class MarketMaker:
                 config["prec_amount"],
             )
 
+            # 清空上一周期的反针对订单ID记录
+            self.current_anti_pin_order_ids = []
+
             # 创建反针对卖单
+            sell_client_order_id = self.order_manager.create_temp_id()
             sell_order_data = {
                 "symbol": symbol,
-                "clientOrderId": self.order_manager.create_temp_id(),
+                "clientOrderId": sell_client_order_id,
                 "side": SIDE_SELL,
                 "type": ORDER_TYPE_LIMIT,
                 "timeInForce": TIME_IN_FORCE_GTC,
@@ -275,11 +343,13 @@ class MarketMaker:
                 "quoteQty": None,
             }
             add_orders.append(sell_order_data)
-            
+            self.current_anti_pin_order_ids.append(sell_client_order_id)
+
             # 创建反针对买单
+            buy_client_order_id = self.order_manager.create_temp_id()
             buy_order_data = {
                 "symbol": symbol,
-                "clientOrderId": self.order_manager.create_temp_id(),
+                "clientOrderId": buy_client_order_id,
                 "side": SIDE_BUY,
                 "type": ORDER_TYPE_LIMIT,
                 "timeInForce": TIME_IN_FORCE_GTC,
@@ -289,6 +359,7 @@ class MarketMaker:
                 "quoteQty": None,
             }
             add_orders.append(buy_order_data)
+            self.current_anti_pin_order_ids.append(buy_client_order_id)
 
             logging.info(
                 f"anti_pin_price_sell {anti_pin_price_sell} anti_pin_price_buy {anti_pin_price_buy} "
@@ -341,8 +412,17 @@ class MarketMaker:
                         except Exception as e:
                             logging.error(f"批量取消订单失败: {e}")
                             pass
-            
+
             execute_order_batches()
+
+            # 在新反针对订单添加完成后，取消旧的反针对订单
+            # 这样可以避免保护空窗期，确保始终有反针对订单保护
+            self._cancel_old_anti_pin_orders(
+                symbol=symbol,
+                anti_pin_price_sell=anti_pin_price_sell,
+                anti_pin_price_buy=anti_pin_price_buy,
+                exclude_order_ids=self.current_anti_pin_order_ids
+            )
         else:
             logging.info(f"[{time.strftime('%H:%M:%S')}] Waiting for net value..")
     
