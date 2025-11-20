@@ -425,10 +425,59 @@ stop_loss:
 
 ### Configuration
 
-- API keys stored in `APIKey*.json` files (different environments)
-- Strategy parameters embedded in individual runner scripts
-- Redis connection defaults to localhost:6379
-- Logging configured per component with rotation
+#### API密钥配置（推荐使用 .env）
+
+**方式1: 使用 .env 文件（推荐）**
+
+创建项目根目录下的 `.env` 文件：
+
+```bash
+# XT Exchange API Keys
+access_key=your_access_key_here
+secret_key=your_secret_key_here
+
+# PostgreSQL配置（可选）
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=your_password
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=xt_etf
+
+# OpenTelemetry配置（可选）
+ENABLE_OTEL=true
+OTLP_ENDPOINT=http://localhost:4317
+
+# WebSocket配置（可选）
+ENABLE_WEBSOCKET=true
+
+# 日志配置（可选）
+LOG_LEVEL=INFO
+```
+
+**优势**:
+- ✅ 不会误提交到Git（已在 `.gitignore` 中）
+- ✅ 更安全，统一管理
+- ✅ 优先级高于 `APIKey.json`
+
+**方式2: 使用 APIKey.json 文件（降级方案）**
+
+仅在无法使用 `.env` 时使用：
+```json
+{
+  "xt_ton3l": {
+    "access_key": "your_access_key",
+    "secret_key": "your_secret_key"
+  }
+}
+```
+
+**详细配置说明**: 参见 [docs/ENV_CONFIGURATION.md](docs/ENV_CONFIGURATION.md)
+
+#### 其他配置
+
+- Strategy parameters: `config/strategies.yaml`
+- Redis connection: localhost:6379
+- Logging: Per-component with rotation
 
 ### Testing Strategy
 
