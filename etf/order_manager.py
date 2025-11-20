@@ -1177,7 +1177,7 @@ class OrderManager:
                         cmu_deltaQty += deltaQty
 
                         current_time = time.time()
-                        self.filled_orders.append({
+                        filled_order_data = {
                             "symbol": res["symbol"],
                             "side": res["side"],
                             "price": res["price"],
@@ -1188,7 +1188,24 @@ class OrderManager:
                                 current_time, tz=timezone.utc
                             ).astimezone(timezone(timedelta(hours=8))),
                             "state": res["state"],
-                        })
+                        }
+                        self.filled_orders.append(filled_order_data)
+
+                        # 记录成交到数据库
+                        trade_data = {
+                            "symbol": res["symbol"],
+                            "trade_id": f"{res['orderId']}_fill",  # 使用orderId生成唯一trade_id
+                            "order_id": res["orderId"],
+                            "price": res["price"],
+                            "quantity": abs(deltaQty),  # 取绝对值
+                            "quote_quantity": float(res["price"]) * abs(deltaQty),
+                            "is_buyer": res["side"] == "BUY",
+                            "traded_at": datetime.fromtimestamp(current_time, tz=timezone.utc),
+                            "strategy_name": self.strategy_name if hasattr(self, 'strategy_name') else None,
+                        }
+                        # 判断是否为洗盘交易（可以根据订单来源判断）
+                        is_wash = res.get("is_wash_trading", False)
+                        self.record_trade(trade_data, is_wash_trading=is_wash)
 
                         self.trading_history.append({
                             "orderId": res["orderId"],
@@ -1336,6 +1353,23 @@ class OrderManager:
                             "price": res["price"],
                             "deltaQty": deltaQty,
                         })
+
+                        # 记录成交到数据库
+                        current_time = time.time()
+                        trade_data = {
+                            "symbol": res["symbol"],
+                            "trade_id": f"{res['orderId']}_fill",  # 使用orderId生成唯一trade_id
+                            "order_id": res["orderId"],
+                            "price": res["price"],
+                            "quantity": abs(deltaQty),  # 取绝对值
+                            "quote_quantity": float(res["price"]) * abs(deltaQty),
+                            "is_buyer": res["side"] == "BUY",
+                            "traded_at": datetime.fromtimestamp(current_time, tz=timezone.utc),
+                            "strategy_name": self.strategy_name if hasattr(self, 'strategy_name') else None,
+                        }
+                        # 判断是否为洗盘交易（可以根据订单来源判断）
+                        is_wash = res.get("is_wash_trading", False)
+                        self.record_trade(trade_data, is_wash_trading=is_wash)
 
                         # remove order
                         self.filled_orders.append(res["orderId"])
