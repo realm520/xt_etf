@@ -20,6 +20,8 @@ dependencies = [
     "aiofiles",
     "sqlalchemy[asyncio]",
     "asyncpg>=0.29.0",
+    "tenacity>=8.0.0",
+    "tabulate>=0.9.0",
     "superclaude>=3.0.0.1",
     "python-pptx>=1.0.2",
     "python-dotenv>=1.0.0",
