@@ -273,6 +273,89 @@ class SystemLog(Base):
     )
 
 
+class NetValueHistory(Base):
+    """净值历史表 - 记录净值时间序列数据"""
+
+    __tablename__ = "net_value_history"
+
+    # 主键
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # 策略信息
+    strategy_name = Column(String(20), nullable=False, index=True)  # stg3l/stg3s/stg5l/stg5s
+    symbol = Column(String(20), nullable=False, index=True)  # stg_usdt/ton_usdt
+    leverage = Column(Integer, nullable=False)  # 3 or 5
+    direction = Column(String(5), nullable=False)  # long/short
+
+    # 净值数据
+    net_value = Column(Numeric(20, 8), nullable=False)
+    underlying_price = Column(Numeric(20, 8))  # 标的资产价格
+
+    # 变化信息
+    change_rate = Column(Numeric(10, 6))  # 净值变化率
+    price_change_rate = Column(Numeric(10, 6))  # 价格变化率
+    fee_deducted = Column(Numeric(20, 8))  # 本次扣除的管理费
+    cumulative_fee = Column(Numeric(20, 8))  # 累计管理费
+
+    # 再平衡标记
+    rebalance_triggered = Column(Boolean, default=False)
+    rebalance_count = Column(Integer, default=0)
+
+    # 时间戳
+    recorded_at = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=func.now())
+
+    # 索引（使用 nv_ 前缀避免与其他表的索引名称冲突）
+    __table_args__ = (
+        Index("idx_nv_strategy_time", "strategy_name", "recorded_at"),
+        Index("idx_nv_symbol_time", "symbol", "recorded_at"),
+        Index("idx_nv_recorded_at", "recorded_at"),
+    )
+
+
+class NetValueEvent(Base):
+    """净值异常事件表 - 记录价格突变、断线恢复等异常事件"""
+
+    __tablename__ = "net_value_events"
+
+    # 主键
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # 策略信息
+    strategy_name = Column(String(20), nullable=False, index=True)
+    symbol = Column(String(20), nullable=False, index=True)
+
+    # 事件类型
+    event_type = Column(
+        String(20), nullable=False, index=True
+    )  # price_spike/long_restart/recovery
+    severity = Column(String(10))  # low/medium/high/critical
+
+    # 事件详情
+    old_price = Column(Numeric(20, 8))
+    new_price = Column(Numeric(20, 8))
+    change_rate = Column(Numeric(10, 6))
+    gap_seconds = Column(Integer)
+    missed_intervals = Column(Integer)
+
+    # 关联净值记录
+    net_value_id = Column(Integer)  # 外键关联到net_value_history.id
+
+    # 额外信息（JSON格式）
+    extra_data = Column(JSON)
+
+    # 时间戳
+    event_time = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=func.now())
+
+    # 索引（使用 nv_event_ 前缀避免与其他表的索引名称冲突）
+    __table_args__ = (
+        Index("idx_nv_event_type_time", "event_type", "event_time"),
+        Index("idx_nv_event_strategy", "strategy_name", "event_time"),
+        Index("idx_nv_event_severity", "severity", "event_time"),
+    )
+
+
 # 创建所有表的函数
 def create_tables(engine):
     """创建所有数据表"""

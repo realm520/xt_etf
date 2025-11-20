@@ -6,9 +6,11 @@
 - 记录详细的时间戳信息
 - 管理费精确计算
 - 异常保护机制
+- PostgreSQL持久化存储（可选）
 
 Author: AllenBrother
 Date:   2024/12/19
+Updated: 2025-01-20 (添加数据库持久化)
 """
 
 import json
@@ -26,6 +28,7 @@ from etf.utils.ds import Queue
 # 类型提示（避免循环导入）
 if TYPE_CHECKING:
     from etf.observability.metrics import MetricsCollector
+    from etf.storage.net_value_recorder import NetValueRecorder
 
 
 class ImprovedNetValue:
@@ -43,6 +46,8 @@ class ImprovedNetValue:
         max_single_change: float = 0.10,  # 最大单次变化率限制
         max_restart_gap: int = 300,  # 最大重启间隔（秒）
         metrics_collector: Optional['MetricsCollector'] = None,  # OpenTelemetry 指标收集器
+        enable_db_persistence: bool = False,  # 启用数据库持久化（默认禁用）
+        strategy_name: Optional[str] = None,  # 策略名称（用于数据库记录）
     ):
         self.symbol = symbol
         self.m_lever = m_lever
@@ -54,6 +59,14 @@ class ImprovedNetValue:
         self.max_single_change = max_single_change
         self.max_restart_gap = max_restart_gap
         self.metrics_collector = metrics_collector  # OpenTelemetry 指标收集器
+        self.enable_db_persistence = enable_db_persistence
+
+        # 策略名称（从symbol推导）
+        if strategy_name:
+            self.strategy_name = strategy_name
+        else:
+            direction = "l" if self.long else "s"
+            self.strategy_name = f"{self.symbol.split('_')[0]}{self.m_lever}{direction}"
 
         # Redis连接
         self.r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
@@ -69,7 +82,23 @@ class ImprovedNetValue:
         # 价格队列
         self.underlying_mid_price_queue = Queue(2)
 
-        # 初始化净值数据
+        # 数据库记录器（必须在 _init_net_value 之前初始化，因为恢复逻辑需要用到）
+        self.db_recorder: Optional['NetValueRecorder'] = None
+        if enable_db_persistence:
+            try:
+                from etf.storage.net_value_recorder import NetValueRecorder
+                self.db_recorder = NetValueRecorder(
+                    strategy_name=self.strategy_name,
+                    batch_size=40,
+                    flush_interval=10.0,
+                    enable_persistence=True
+                )
+                logger.info(f"数据库持久化已启用: {self.strategy_name}")
+            except Exception as e:
+                logger.error(f"数据库记录器初始化失败: {e}，将仅使用Redis")
+                self.db_recorder = None
+
+        # 初始化净值数据（必须在 db_recorder 之后，因为可能需要记录恢复事件）
         self.net_value_data = self._init_net_value(init_net_value)
 
         # 交易所客户端
@@ -78,8 +107,72 @@ class ImprovedNetValue:
         )
 
         logger.info(
-            f"净值计算器初始化完成: {self.symbol}, 杠杆: {self.m_lever}x, 方向: {'做多' if self.long else '做空'}"
+            f"净值计算器初始化完成: {self.symbol}, 杠杆: {self.m_lever}x, 方向: {'做多' if self.long else '做空'}, "
+            f"数据库持久化: {'启用' if self.db_recorder else '禁用'}"
         )
+
+    def _get_or_create_event_loop(self) -> asyncio.AbstractEventLoop:
+        """获取或创建持久的事件循环（用于异步数据库操作）"""
+        if not hasattr(self, '_event_loop') or self._event_loop is None or self._event_loop.is_closed():
+            import threading
+            
+            # 创建新的事件循环和线程
+            self._event_loop = asyncio.new_event_loop()
+            
+            def run_loop():
+                """在独立线程中运行事件循环"""
+                asyncio.set_event_loop(self._event_loop)
+                self._event_loop.run_forever()
+            
+            self._loop_thread = threading.Thread(
+                target=run_loop,
+                daemon=True,
+                name="async_db_loop"
+            )
+            self._loop_thread.start()
+            logger.debug(f"{self.strategy_name}: 创建持久事件循环用于异步数据库操作")
+        
+        return self._event_loop
+
+    def _cleanup_async_resources(self):
+        """清理异步资源（事件循环、数据库连接等）"""
+        try:
+            # 刷新数据库缓冲
+            if self.db_recorder:
+                logger.info(f"{self.strategy_name}: 正在刷新数据库缓冲...")
+                loop = self._get_or_create_event_loop()
+                future = asyncio.run_coroutine_threadsafe(
+                    self.db_recorder.flush_all(),
+                    loop
+                )
+                # 等待刷新完成（最多10秒）
+                future.result(timeout=10)
+                
+                # 关闭数据库连接
+                future = asyncio.run_coroutine_threadsafe(
+                    self.db_recorder.close(),
+                    loop
+                )
+                future.result(timeout=5)
+                logger.info(f"{self.strategy_name}: 数据库资源已清理")
+            
+            # 停止事件循环
+            if hasattr(self, '_event_loop') and self._event_loop and not self._event_loop.is_closed():
+                self._event_loop.call_soon_threadsafe(self._event_loop.stop)
+                if hasattr(self, '_loop_thread') and self._loop_thread.is_alive():
+                    self._loop_thread.join(timeout=5)
+                logger.debug(f"{self.strategy_name}: 事件循环已停止")
+            
+            # 关闭线程池
+            if hasattr(self, '_db_thread_pool'):
+                self._db_thread_pool.shutdown(wait=True, cancel_futures=False)
+            if hasattr(self, '_event_thread_pool'):
+                self._event_thread_pool.shutdown(wait=True, cancel_futures=False)
+            
+            logger.info(f"{self.strategy_name}: 所有异步资源已清理")
+            
+        except Exception as e:
+            logger.error(f"{self.strategy_name}: 清理异步资源时出错: {e}", exc_info=True)
 
     def _init_net_value(self, default_value: float) -> Dict:
         """初始化净值数据"""
@@ -136,12 +229,10 @@ class ImprovedNetValue:
             }
 
     def _save_to_redis(self, data: Dict):
-        """保存数据到Redis"""
+        """保存数据到Redis + PostgreSQL（异步）"""
         try:
-            # 保存简单净值（兼容旧版本）
+            # 1. 保存到Redis（实时查询）
             self.r.set(self.redis_key, str(data["net_value"]))
-
-            # 保存详细数据
             self.r.set(self.redis_detail_key, json.dumps(data))
 
             # 保存到历史记录
@@ -153,6 +244,11 @@ class ImprovedNetValue:
             self.r.lpush(self.redis_history_key, json.dumps(history_data))
             self.r.ltrim(self.redis_history_key, 0, 1000)  # 保留最近1000条
 
+            # 2. 异步写入PostgreSQL（持久化）
+            # 使用后台线程处理异步数据库写入，避免阻塞主循环
+            if self.db_recorder:
+                self._record_net_value_to_db_sync(data)
+
         except Exception as e:
             logger.error(f"保存数据到Redis失败: {e}")
 
@@ -162,11 +258,18 @@ class ImprovedNetValue:
             logger.error(
                 f"断线时间过长({gap_seconds:.1f}秒)，超过最大限制({self.max_restart_gap}秒)"
             )
-            data["abnormal_events"].append({
+            event_data = {
                 "type": "long_restart",
                 "gap_seconds": gap_seconds,
                 "timestamp": time.time(),
-            })
+                "severity": "critical",
+            }
+            data["abnormal_events"].append(event_data)
+
+            # 记录到数据库
+            if self.db_recorder:
+                self._record_event_sync("long_restart", event_data)
+
             return
 
         try:
@@ -189,12 +292,14 @@ class ImprovedNetValue:
                 )
 
             # 记录恢复事件
-            data["abnormal_events"].append({
+            event_data = {
                 "type": "recovery",
                 "gap_seconds": gap_seconds,
                 "missed_intervals": missed_intervals,
                 "timestamp": time.time(),
-            })
+                "severity": "high" if gap_seconds > 180 else "medium",
+            }
+            data["abnormal_events"].append(event_data)
 
             # 记录恢复日志（告警已移除，使用日志记录）
             logger.warning(f"净值恢复事件:")
@@ -205,8 +310,111 @@ class ImprovedNetValue:
             logger.warning(f"  净值: {data['net_value']:.6f}")
             logger.warning(f"  补扣管理费: {total_fee_rate * data['net_value']:.6f}")
 
+            # 记录到数据库（使用线程安全的方式）
+            if self.db_recorder:
+                self._record_event_sync("recovery", event_data)
+
         except Exception as e:
             logger.error(f"恢复净值失败: {e}")
+
+    def _format_db_data(self, data: Dict) -> Dict:
+        """格式化数据为数据库格式"""
+        return {
+            "symbol": self.symbol,
+            "leverage": self.m_lever,
+            "long": self.long,
+            "net_value": data["net_value"],
+            "underlying_price": data.get("last_price"),
+            "change_rate": None,  # 由调用方计算
+            "price_change_rate": None,
+            "fee_deducted": self.time_gap_fee * data["net_value"] if "net_value" in data else None,
+            "cumulative_fee": data.get("total_fee_deducted", 0),
+            "rebalance_triggered": False,  # 由调用方设置
+            "rebalance_count": 0,
+            "recorded_at": data.get("last_update_ts", time.time()),
+        }
+
+    def _record_net_value_to_db_sync(self, data: Dict):
+        """将净值数据记录到数据库（同步方式，使用线程池）"""
+        if not self.db_recorder:
+            return
+
+        try:
+            # 使用线程池执行，避免阻塞主线程
+            from concurrent.futures import ThreadPoolExecutor
+            import threading
+
+            # 创建单例线程池（如果不存在）
+            if not hasattr(self, '_db_thread_pool'):
+                self._db_thread_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db_writer")
+
+            # 提交任务到线程池
+            self._db_thread_pool.submit(self._run_async_db_write, self._format_db_data(data))
+        except Exception as e:
+            logger.debug(f"提交数据库写入任务失败: {e}")
+
+    def _run_async_db_write(self, formatted_data: Dict):
+        """在后台线程中运行异步数据库写入"""
+        try:
+            # 使用事件循环线程安全方式提交任务
+            loop = self._get_or_create_event_loop()
+            future = asyncio.run_coroutine_threadsafe(
+                self.db_recorder.record_net_value(formatted_data),
+                loop
+            )
+            # 不等待结果，让它在后台完成
+        except Exception as e:
+            logger.debug(f"后台数据库写入失败（正常，将由批量处理）: {e}")
+
+    def _record_event_sync(self, event_type: str, event_data: Dict):
+        """记录异常事件到数据库（同步方式，使用线程池）"""
+        if not self.db_recorder:
+            return
+
+        try:
+            # 使用线程池执行（事件写入优先级更高，使用独立线程池）
+            from concurrent.futures import ThreadPoolExecutor
+
+            if not hasattr(self, '_event_thread_pool'):
+                self._event_thread_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="event_writer")
+
+            self._event_thread_pool.submit(self._run_async_event_write, event_type, event_data)
+        except Exception as e:
+            logger.debug(f"提交事件写入任务失败: {e}")
+
+    def _run_async_event_write(self, event_type: str, event_data: Dict):
+        """在后台线程中运行异步事件写入"""
+        try:
+            # 使用事件循环线程安全方式提交任务
+            loop = self._get_or_create_event_loop()
+            future = asyncio.run_coroutine_threadsafe(
+                self._record_event_async_impl(event_type, event_data),
+                loop
+            )
+            # 不等待结果，让它在后台完成
+        except Exception as e:
+            logger.debug(f"后台事件写入失败: {e}")
+
+    async def _record_event_async_impl(self, event_type: str, event_data: Dict):
+        """记录异常事件到数据库的异步实现"""
+        if not self.db_recorder:
+            return
+
+        try:
+            await self.db_recorder.record_event({
+                "symbol": self.symbol,
+                "event_type": event_type,
+                "severity": event_data.get("severity", "medium"),
+                "old_price": event_data.get("p0"),
+                "new_price": event_data.get("p1"),
+                "change_rate": event_data.get("change_rate"),
+                "gap_seconds": event_data.get("gap_seconds"),
+                "missed_intervals": event_data.get("missed_intervals"),
+                "event_time": event_data.get("timestamp", time.time()),
+                "extra_data": event_data,
+            })
+        except Exception as e:
+            logger.error(f"记录异常事件失败: {e}")
 
     def update_mid_price(self) -> Optional[float]:
         """更新中间价"""
@@ -245,13 +453,16 @@ class ImprovedNetValue:
         # 异常保护：限制单次最大变化
         if abs(v) > self.max_single_change:
             logger.warning(f"价格变化过大: {v:.4f}, 限制为: {self.max_single_change}")
-            self.net_value_data["abnormal_events"].append({
+
+            event_data = {
                 "type": "price_spike",
                 "change_rate": v,
                 "p0": p0,
                 "p1": p1,
                 "timestamp": time.time(),
-            })
+                "severity": "high" if abs(v) > 0.15 else "medium",
+            }
+            self.net_value_data["abnormal_events"].append(event_data)
 
             # 记录异常价格日志（告警已移除，使用日志记录）
             logger.error(f"异常价格变化:")
@@ -260,6 +471,10 @@ class ImprovedNetValue:
             logger.error(f"  旧价格: {p0:.4f}")
             logger.error(f"  新价格: {p1:.4f}")
             logger.error(f"  杠杆: {self.m_lever}x {'做多' if self.long else '做空'}")
+
+            # 记录到数据库
+            if self.db_recorder:
+                self._record_event_sync("price_spike", event_data)
 
             v = self.max_single_change if v > 0 else -self.max_single_change
             # 调整p1为限制后的价格，用于后续再平衡计算
@@ -389,6 +604,8 @@ class ImprovedNetValue:
             except KeyboardInterrupt:
                 logger.info("收到退出信号，保存数据并退出")
                 self._save_to_redis(self.net_value_data)
+                # 清理异步资源
+                self._cleanup_async_resources()
                 break
             except Exception as e:
                 logger.error(f"运行异常: {e}", exc_info=True)
