@@ -48,6 +48,13 @@ class ImprovedNetValue:
         metrics_collector: Optional['MetricsCollector'] = None,  # OpenTelemetry 指标收集器
         enable_db_persistence: bool = False,  # 启用数据库持久化（默认禁用）
         strategy_name: Optional[str] = None,  # 策略名称（用于数据库记录）
+        # 新增：净值推送相关参数
+        enable_push_to_exchange: bool = False,  # 启用推送到交易所（默认禁用）
+        push_interval: int = 60,  # 推送间隔（秒），默认60秒推送一次
+        push_host: Optional[str] = None,  # 交易所API主机（None则使用默认）
+        push_access_key: Optional[str] = None,  # 推送用的access_key
+        push_secret_key: Optional[str] = None,  # 推送用的secret_key
+        push_symbol: Optional[str] = None,  # 推送到交易所的symbol名称（如 "TON3L_USDT"）
     ):
         self.symbol = symbol
         self.m_lever = m_lever
@@ -60,6 +67,14 @@ class ImprovedNetValue:
         self.max_restart_gap = max_restart_gap
         self.metrics_collector = metrics_collector  # OpenTelemetry 指标收集器
         self.enable_db_persistence = enable_db_persistence
+
+        # 净值推送相关配置
+        self.enable_push_to_exchange = enable_push_to_exchange
+        self.push_interval = push_interval
+        self.push_host = push_host or "https://sapi.xt.com"  # 默认生产环境
+        self.push_symbol = push_symbol  # 交易所symbol（如 "TON3L_USDT"）
+        self.last_push_time = 0  # 上次推送时间戳
+        self.push_client = None  # 推送用的Spot客户端
 
         # 策略名称（从symbol推导）
         if strategy_name:
@@ -101,14 +116,32 @@ class ImprovedNetValue:
         # 初始化净值数据（必须在 db_recorder 之后，因为可能需要记录恢复事件）
         self.net_value_data = self._init_net_value(init_net_value)
 
-        # 交易所客户端
+        # 交易所客户端（获取价格）
         self.spot_client = Spot(
             host="https://sapi.xt.com", access_key="", secret_key=""
         )
 
+        # 初始化推送客户端（如果启用推送）
+        if self.enable_push_to_exchange:
+            if not push_access_key or not push_secret_key:
+                logger.warning("推送功能已启用但未提供API密钥，推送将被禁用")
+                self.enable_push_to_exchange = False
+            else:
+                self.push_client = Spot(
+                    host=self.push_host,
+                    access_key=push_access_key,
+                    secret_key=push_secret_key
+                )
+                logger.info(
+                    f"净值推送功能已启用: {self.push_symbol or self.strategy_name.upper() + '_USDT'}, "
+                    f"推送间隔: {self.push_interval}秒, "
+                    f"目标主机: {self.push_host}"
+                )
+
         logger.info(
             f"净值计算器初始化完成: {self.symbol}, 杠杆: {self.m_lever}x, 方向: {'做多' if self.long else '做空'}, "
-            f"数据库持久化: {'启用' if self.db_recorder else '禁用'}"
+            f"数据库持久化: {'启用' if self.db_recorder else '禁用'}, "
+            f"交易所推送: {'启用' if self.enable_push_to_exchange else '禁用'}"
         )
 
     def _get_or_create_event_loop(self) -> asyncio.AbstractEventLoop:
@@ -519,6 +552,97 @@ class ImprovedNetValue:
         logger.debug(f"扣除管理费: {fee_amount:.6f}, 费率: {self.time_gap_fee:.6f}")
         return net_value_after_fee
 
+    def _push_net_value_to_exchange(self, net_value: float, retry_count: int = 3) -> bool:
+        """
+        推送净值到交易所
+        
+        Args:
+            net_value: 要推送的净值
+            retry_count: 失败重试次数
+            
+        Returns:
+            bool: 推送是否成功
+        """
+        if not self.enable_push_to_exchange or not self.push_client:
+            return False
+        
+        # 检查推送间隔
+        current_time = time.time()
+        if current_time - self.last_push_time < self.push_interval:
+            logger.debug(f"距离上次推送不足{self.push_interval}秒，跳过本次推送")
+            return False
+        
+        # 确定推送的symbol名称（如 "TON3L_USDT"）
+        push_symbol = self.push_symbol
+        if not push_symbol:
+            # 自动构建symbol：从 "ton_usdt" + 杠杆 + 方向 => "TON3L_USDT"
+            base_symbol = self.symbol.split('_')[0].upper()  # "ton" => "TON"
+            direction = "L" if self.long else "S"
+            push_symbol = f"{base_symbol}{self.m_lever}{direction}_USDT"
+        
+        # 尝试推送（带重试）
+        for attempt in range(retry_count):
+            try:
+                logger.info(f"正在推送净值到交易所 (尝试 {attempt + 1}/{retry_count}): {push_symbol} = {net_value:.6f}")
+                
+                result = self.push_client.update_etf_net_worth(
+                    symbol=push_symbol,
+                    net_worth=net_value
+                )
+                
+                # 推送成功
+                self.last_push_time = current_time
+                logger.info(f"✅ 净值推送成功: {push_symbol} = {net_value:.6f}, 响应: {result}")
+                
+                # 记录成功事件到数据库
+                if self.db_recorder:
+                    event_data = {
+                        "type": "net_value_push_success",
+                        "symbol": push_symbol,
+                        "net_value": net_value,
+                        "timestamp": current_time,
+                        "severity": "low",
+                        "attempt": attempt + 1
+                    }
+                    self._record_event_sync("net_value_push", event_data)
+                
+                return True
+                
+            except Exception as e:
+                logger.error(f"❌ 推送净值失败 (尝试 {attempt + 1}/{retry_count}): {e}")
+                
+                # 记录失败事件
+                if attempt == retry_count - 1:  # 最后一次尝试
+                    event_data = {
+                        "type": "net_value_push_failed",
+                        "symbol": push_symbol,
+                        "net_value": net_value,
+                        "timestamp": current_time,
+                        "error": str(e),
+                        "severity": "high",
+                        "attempts": retry_count
+                    }
+                    
+                    # 记录到数据库
+                    if self.db_recorder:
+                        self._record_event_sync("net_value_push_failed", event_data)
+                    
+                    # 记录到abnormal_events
+                    self.net_value_data["abnormal_events"].append(event_data)
+                    
+                    # 日志告警
+                    logger.error(f"🚨 净值推送失败（已重试{retry_count}次）:")
+                    logger.error(f"  交易对: {push_symbol}")
+                    logger.error(f"  净值: {net_value:.6f}")
+                    logger.error(f"  错误: {e}")
+                    logger.error(f"  主机: {self.push_host}")
+                
+                # 等待后重试
+                if attempt < retry_count - 1:
+                    time.sleep(2 ** attempt)  # 指数退避：1s, 2s, 4s
+        
+        return False
+
     def run(self):
         """主运行循环"""
         logger.info(f"净值计算器开始运行: {self.symbol}")
@@ -564,6 +688,10 @@ class ImprovedNetValue:
 
                 # 保存到Redis
                 self._save_to_redis(self.net_value_data)
+
+                # 📤 推送净值到交易所（如果启用）
+                if self.enable_push_to_exchange:
+                    self._push_net_value_to_exchange(net_value_after_fee)
 
                 # 📊 记录净值指标（OpenTelemetry）
                 if self.metrics_collector:

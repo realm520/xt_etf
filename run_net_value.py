@@ -124,6 +124,10 @@ def main():
     db_config = full_config.get("database", {}).get("net_value_persistence", {})
     enable_db_persistence = db_config.get("enabled", False)
 
+    # 获取全局净值推送配置
+    global_push_config = full_config.get("net_value_push", {})
+    enable_push = global_push_config.get("enabled", False)
+
     # 构建净值计算参数
     net_value_params = {
         "symbol": args.symbol or strategy_params["symbol"],
@@ -143,6 +147,77 @@ def main():
         "enable_db_persistence": enable_db_persistence,
         "strategy_name": args.strategy,
     }
+
+    # 添加推送参数（如果启用）
+    if enable_push:
+        # 尝试多种方式加载API密钥（优先级：.env > APIKey.json）
+        api_key = None
+        
+        # 方式1: 从 .env 文件加载（推荐）
+        from dotenv import load_dotenv
+        load_dotenv()
+        
+        access_key_env = os.getenv("access_key")
+        secret_key_env = os.getenv("secret_key")
+        
+        if access_key_env and secret_key_env:
+            api_key = {
+                "access_key": access_key_env,
+                "secret_key": secret_key_env
+            }
+            logging.info("✅ 从 .env 文件加载API密钥")
+        else:
+            # 方式2: 从 APIKey.json 加载（降级方案）
+            api_key_file = strategy_config.get("apikey", "APIKey.json")
+            api_key_path = os.path.join(os.path.dirname(__file__), api_key_file)
+            
+            if os.path.exists(api_key_path):
+                with open(api_key_path, "r") as f:
+                    api_keys = json.load(f)
+                
+                # 查找策略对应的密钥
+                strategy_key = f"xt_{args.strategy}"
+                if strategy_key in api_keys:
+                    api_key = api_keys[strategy_key]
+                    logging.info(f"✅ 从 {api_key_file} 加载API密钥: {strategy_key}")
+                elif "access_key" in api_keys:
+                    # 单策略文件格式
+                    api_key = api_keys
+                    logging.info(f"✅ 从 {api_key_file} 加载API密钥（单策略格式）")
+                else:
+                    logging.warning(f"⚠️ 未找到策略 {args.strategy} 的API密钥")
+            else:
+                logging.warning(f"⚠️ API密钥文件不存在: {api_key_path}")
+        
+        # 根据是否成功加载密钥来决定是否启用推送
+        if api_key and api_key.get("access_key") and api_key.get("secret_key"):
+            # 从全局配置确定主机地址（根据环境自动选择）
+            env_config = global_push_config.get("environments", {})
+            if args.env == "qa":
+                push_host = env_config.get("qa", {}).get("host", "https://sapi.xt-qa2.com")
+            else:
+                push_host = env_config.get("prod", {}).get("host", "https://sapi.xt.com")
+            
+            # 从全局配置的symbol映射中查找，如果没有则自动生成
+            symbol_mapping = global_push_config.get("symbol_mapping", {})
+            push_symbol = symbol_mapping.get(args.strategy)  # 可能是None，会自动生成
+            
+            net_value_params.update({
+                "enable_push_to_exchange": True,
+                "push_interval": global_push_config.get("interval", 60),
+                "push_host": push_host,
+                "push_access_key": api_key.get("access_key"),
+                "push_secret_key": api_key.get("secret_key"),
+                "push_symbol": push_symbol,  # 如果配置了symbol则使用，否则自动生成
+            })
+            logging.info(f"✅ 净值推送已启用 - 主机: {push_host}, 推送间隔: {global_push_config.get('interval', 60)}秒")
+        else:
+            logging.warning("⚠️  净值推送配置已启用，但未找到有效的API密钥，推送将被禁用")
+            logging.warning("请确保以下任一方式配置API密钥:")
+            logging.warning("  1. 在 .env 文件中设置: access_key=xxx 和 secret_key=xxx")
+            logging.warning("  2. 在 APIKey.json 文件中配置相应的密钥")
+    else:
+        net_value_params["enable_push_to_exchange"] = False
 
     # 日志输出配置信息
     logging.info(f"启动净值计算器 - 策略: {args.strategy}")
