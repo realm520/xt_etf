@@ -179,6 +179,15 @@ class OrderManager:
             """在独立线程中运行事件循环"""
             self._recorder_loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._recorder_loop)
+            
+            # 在后台循环中初始化Redis连接
+            try:
+                self._recorder_loop.run_until_complete(
+                    self.order_recorder.initialize_in_loop()
+                )
+            except Exception as e:
+                logging.error(f"后台线程Redis初始化失败: {e}")
+            
             self._recorder_running = True
             logging.info("订单记录器后台事件循环已启动")
 

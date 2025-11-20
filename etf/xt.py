@@ -148,6 +148,12 @@ class Spot:
             return self.auth_req(url, "DELETE", params=params, json=json)
         return self.req(url, "DELETE", params=params, json=json)
 
+    def req_put(self, url, params=None, auth=None):  # put 请求 只支持json数据
+        auth = auth if auth is not None else '/v4/public' not in url
+        if auth:
+            return self.auth_req(url=url, method="PUT", json=params)
+        return self.req(url=url, method="PUT", json=params)
+
     # -----------------------------------市场数据-----------------------------------
 
     def get_time(self) -> int:
@@ -621,6 +627,48 @@ class Spot:
         }
         res = self.req_post('/v4/withdraw', params, auth=True)
         return res['result']
+
+    # -----------------------------------ETF净值管理-----------------------------------
+
+    def update_etf_net_worth(self, symbol: str, net_worth: float) -> dict:
+        """
+        推送ETF净值到交易所
+        API文档: https://sapi.xt.com/v4/etf/net-worth
+
+        :param symbol: ETF交易对符号，如 "BTC3S_USDT", "TON3L_USDT"
+        :param net_worth: 净值，浮点数（必须大于0）
+        :return: 交易所响应结果 {'rc': 0, 'mc': 'SUCCESS', 'ma': [], 'result': {...}}
+
+        使用示例:
+            # QA环境
+            client = Spot(host="https://sapi.xt-qa2.com", access_key="xxx", secret_key="xxx")
+            result = client.update_etf_net_worth("TON3L_USDT", 1.0234)
+
+            # 生产环境
+            client = Spot(host="https://sapi.xt.com", access_key="xxx", secret_key="xxx")
+            result = client.update_etf_net_worth("STG3L_USDT", 0.9876)
+
+        异常:
+            XtCodeError: 未提供认证信息时抛出
+            XtBusinessError: 业务错误（如净值<0、symbol不存在等）
+            XtHttpError: 网络或HTTP错误
+        """
+        if self.anonymous:
+            raise XtCodeError('推送净值需要提供认证信息')
+
+        if net_worth <= 0:
+            raise XtCodeError(f'净值必须大于0，当前值: {net_worth}')
+
+        # 构建请求参数
+        params = {
+            "symbol": symbol,
+            "netWorth": net_worth
+        }
+
+        # 使用PUT方法发送请求
+        res = self.req_put(url='/v4/etf/net-worth', params=params, auth=True)
+        logger.info(f"成功推送ETF净值到交易所: {symbol} = {net_worth}")
+        return res
 
 
 import json

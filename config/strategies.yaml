@@ -271,3 +271,25 @@ strategies:
       time_stop: 8           # 时间止损 8小时（做空风险高，更短持仓时间）
       cooldown: 60           # 止损后冷却时间（分钟）
       enable_partial_close: true  # 是否启用部分平仓
+
+# ========================================
+# 全局配置 - 数据库持久化
+# ========================================
+database:
+  # PostgreSQL 连接配置（通过环境变量设置）
+  # POSTGRES_USER: postgres
+  # POSTGRES_PASSWORD: your_password
+  # POSTGRES_HOST: localhost
+  # POSTGRES_PORT: 5432
+  # POSTGRES_DB: xt_etf
+
+  # 净值持久化配置
+  net_value_persistence:
+    enabled: true           # 启用数据库持久化（默认禁用，策略上线前启用）
+    batch_size: 40          # 批量大小（4策略 × 10秒 = 40条/批）
+    flush_interval: 10      # 刷新间隔（秒）
+    enable_partitioning: false  # 启用月度分区（生产环境推荐）
+
+  # 订单记录器配置（已有）
+  order_persistence:
+    enabled: false          # 当前使用CSV降级（TODO: 实施PostgreSQL集成）
