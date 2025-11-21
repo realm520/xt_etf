@@ -111,13 +111,13 @@ class OrderRecorder:
         """
         # 从环境变量构建数据库URL
         if db_url is None:
-            psql_user = os.getenv("psql_user", "etf_user")
-            psql_password = os.getenv("psql_password", "etf_password")
-            psql_db = os.getenv("psql_db", "etf_trading")
-            psql_host = os.getenv("psql_host", "localhost")
-            psql_port = os.getenv("psql_port", "5432")
+            db_user = os.getenv("POSTGRES_USER", "etf_user")
+            db_password = os.getenv("POSTGRES_PASSWORD", "etf_password")
+            db_name = os.getenv("POSTGRES_DB", "etf_trading")
+            db_host = os.getenv("POSTGRES_HOST", "localhost")
+            db_port = os.getenv("POSTGRES_PORT", "5432")
 
-            db_url = f"postgresql+asyncpg://{psql_user}:{psql_password}@{psql_host}:{psql_port}/{psql_db}"
+            db_url = f"postgresql+asyncpg://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
         self.db_url = db_url
         self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://localhost:6379/0")

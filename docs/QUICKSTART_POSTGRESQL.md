@@ -39,11 +39,11 @@ GRANT ALL PRIVILEGES ON DATABASE etf_trading TO etf_user;
 
 ```bash
 # PostgreSQL 数据库配置
-psql_user=etf_user
-psql_password=etf_password
-psql_db=etf_trading
-psql_host=localhost
-psql_port=5432
+POSTGRES_USER=etf_user
+POSTGRES_PASSWORD=etf_password
+POSTGRES_DB=etf_trading
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
 
 # Redis 配置
 REDIS_URL=redis://localhost:6379/0

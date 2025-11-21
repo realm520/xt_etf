@@ -33,14 +33,14 @@ logger = logging.getLogger(__name__)
 async def create_database():
     """创建数据库（如果不存在）"""
     # 从环境变量读取配置
-    psql_user = os.getenv("psql_user", "etf_user")
-    psql_password = os.getenv("psql_password", "etf_password")
-    psql_db = os.getenv("psql_db", "etf_trading")
-    psql_host = os.getenv("psql_host", "localhost")
-    psql_port = os.getenv("psql_port", "5432")
+    db_user = os.getenv("POSTGRES_USER", "etf_user")
+    db_password = os.getenv("POSTGRES_PASSWORD", "etf_password")
+    db_name = os.getenv("POSTGRES_DB", "etf_trading")
+    db_host = os.getenv("POSTGRES_HOST", "localhost")
+    db_port = os.getenv("POSTGRES_PORT", "5432")
 
     # 连接到postgres数据库（默认数据库）
-    postgres_url = f"postgresql+asyncpg://{psql_user}:{psql_password}@{psql_host}:{psql_port}/postgres"
+    postgres_url = f"postgresql+asyncpg://{db_user}:{db_password}@{db_host}:{db_port}/postgres"
 
     try:
         engine = create_async_engine(postgres_url, isolation_level="AUTOCOMMIT")
@@ -48,16 +48,16 @@ async def create_database():
         async with engine.connect() as conn:
             # 检查数据库是否存在
             result = await conn.execute(
-                text(f"SELECT 1 FROM pg_database WHERE datname = '{psql_db}'")
+                text(f"SELECT 1 FROM pg_database WHERE datname = '{db_name}'")
             )
             exists = result.scalar()
 
             if exists:
-                logger.info(f"✅ 数据库 '{psql_db}' 已存在")
+                logger.info(f"✅ 数据库 '{db_name}' 已存在")
             else:
                 # 创建数据库
-                await conn.execute(text(f'CREATE DATABASE "{psql_db}"'))
-                logger.info(f"✅ 成功创建数据库 '{psql_db}'")
+                await conn.execute(text(f'CREATE DATABASE "{db_name}"'))
+                logger.info(f"✅ 成功创建数据库 '{db_name}'")
 
         await engine.dispose()
 
@@ -70,14 +70,14 @@ async def create_database():
 async def create_tables():
     """创建所有数据表"""
     # 从环境变量读取配置
-    psql_user = os.getenv("psql_user", "etf_user")
-    psql_password = os.getenv("psql_password", "etf_password")
-    psql_db = os.getenv("psql_db", "etf_trading")
-    psql_host = os.getenv("psql_host", "localhost")
-    psql_port = os.getenv("psql_port", "5432")
+    db_user = os.getenv("POSTGRES_USER", "etf_user")
+    db_password = os.getenv("POSTGRES_PASSWORD", "etf_password")
+    db_name = os.getenv("POSTGRES_DB", "etf_trading")
+    db_host = os.getenv("POSTGRES_HOST", "localhost")
+    db_port = os.getenv("POSTGRES_PORT", "5432")
 
     # 连接到目标数据库
-    db_url = f"postgresql+asyncpg://{psql_user}:{psql_password}@{psql_host}:{psql_port}/{psql_db}"
+    db_url = f"postgresql+asyncpg://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
     try:
         engine = create_async_engine(db_url, echo=True)
@@ -109,13 +109,13 @@ async def create_tables():
 
 async def verify_connection():
     """验证数据库连接"""
-    psql_user = os.getenv("psql_user", "etf_user")
-    psql_password = os.getenv("psql_password", "etf_password")
-    psql_db = os.getenv("psql_db", "etf_trading")
-    psql_host = os.getenv("psql_host", "localhost")
-    psql_port = os.getenv("psql_port", "5432")
+    db_user = os.getenv("POSTGRES_USER", "etf_user")
+    db_password = os.getenv("POSTGRES_PASSWORD", "etf_password")
+    db_name = os.getenv("POSTGRES_DB", "etf_trading")
+    db_host = os.getenv("POSTGRES_HOST", "localhost")
+    db_port = os.getenv("POSTGRES_PORT", "5432")
 
-    db_url = f"postgresql+asyncpg://{psql_user}:{psql_password}@{psql_host}:{psql_port}/{psql_db}"
+    db_url = f"postgresql+asyncpg://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
     try:
         engine = create_async_engine(db_url)
@@ -137,17 +137,17 @@ async def verify_connection():
 
 def print_summary():
     """打印配置摘要"""
-    psql_user = os.getenv("psql_user", "etf_user")
-    psql_db = os.getenv("psql_db", "etf_trading")
-    psql_host = os.getenv("psql_host", "localhost")
-    psql_port = os.getenv("psql_port", "5432")
+    db_user = os.getenv("POSTGRES_USER", "etf_user")
+    db_name = os.getenv("POSTGRES_DB", "etf_trading")
+    db_host = os.getenv("POSTGRES_HOST", "localhost")
+    db_port = os.getenv("POSTGRES_PORT", "5432")
 
     print("\n" + "=" * 60)
     print("PostgreSQL 数据库初始化完成")
     print("=" * 60)
-    print(f"主机: {psql_host}:{psql_port}")
-    print(f"数据库: {psql_db}")
-    print(f"用户: {psql_user}")
+    print(f"主机: {db_host}:{db_port}")
+    print(f"数据库: {db_name}")
+    print(f"用户: {db_user}")
     print("\n创建的表:")
     print("  - orders           订单表")
     print("  - trades           成交表")

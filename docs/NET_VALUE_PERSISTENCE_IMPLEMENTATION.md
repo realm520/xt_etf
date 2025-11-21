@@ -372,27 +372,22 @@ ERROR - NetValueRecorder(ton3l): 事件写入失败: role "postgres" does not ex
 ```
 
 **原因**: 环境变量命名不一致
-- `.env` 文件使用: `psql_user`, `psql_password`, `psql_db`
-- 代码期望: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
+- `.env` 文件使用统一格式: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
+- 所有代码已统一使用 `POSTGRES_*` 变量
 
 **解决方案**:
-1. 更新 `.env` 文件，添加 `POSTGRES_*` 变量（保留旧的兼容性）
+1. 使用统一的 `POSTGRES_*` 环境变量配置
 2. 安装缺失的驱动: `uv pip install psycopg2-binary`
 
 **修改文件**: `.env`
 
 ```bash
-# 新格式（用于净值持久化）
+# PostgreSQL 数据库配置（统一格式）
 POSTGRES_USER=xtetf
 POSTGRES_PASSWORD=12345678
 POSTGRES_DB=xtetf
 POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
-
-# 旧格式（兼容性保留）
-psql_user=xtetf
-psql_password=12345678
-psql_db=xtetf
 ```
 
 ---
