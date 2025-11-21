@@ -166,13 +166,20 @@ class Orderbook:
                      "order_id": []})
         return batch_order
 
-def get_orderbook(mid_price=99999.99, bid_ask_spread=None):
-
+def get_orderbook(mid_price=99999.99, bid_ask_spread=None, min_order_value=1.2):
+    """
+    生成符合交易所最小订单金额要求的订单簿
+    
+    Args:
+        mid_price: 中间价（净值）
+        bid_ask_spread: 买卖价差比例
+        min_order_value: 最小订单金额（USDT），默认1.2
+    """
     kwargs = {
         "price_tick": 100,
         "price_step": 10,
         "price_percent": 1e-2,
-        "mean": 50,
+        "mean": 50,  # 订单金额均值（将基于min_order_value调整）
         "scale": 1,
         "sparse": 1e-3,
         #"prec_price": 4, #
@@ -181,6 +188,13 @@ def get_orderbook(mid_price=99999.99, bid_ask_spread=None):
         "bid_ask_spread": 0.01,
         "layer": 30
     }
+    
+    # ✅ 动态调整订单金额参数，确保符合最小订单金额
+    # 根据mid_price和min_order_value计算合理的均值
+    # 目标：生成的订单金额在 [min_order_value, min_order_value * 3] 之间
+    min_amount_coin = min_order_value / mid_price  # 最小币数量
+    kwargs["mean"] = min_amount_coin * 1.5  # 均值设为最小值的1.5倍
+    kwargs["scale"] = min_amount_coin * 0.3  # 标准差设为均值的20%
     # mid_price = 99999.99 # netvalue replace
     if bid_ask_spread is not None:
         kwargs["bid_ask_spread"] = bid_ask_spread

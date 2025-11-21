@@ -121,51 +121,15 @@ class MarketMaker:
         except Exception as e:
             logging.error(f"查询或取消旧反针对订单时出错: {e}")
 
-    def make_orders(
-        self,
-        symbol: Optional[str] = None,
-        clientOrderId: str = DEFAULT_CLIENT_ORDER_ID,
-        netvalue: float = 1.0,
-        env: str = "qa",
-        ordermanager: Optional[Any] = None,
-    ) -> None:
-        """
-        创建模拟做市订单（主要用于测试环境）
-        
-        在QA环境中生成假订单用于测试做市逻辑，不实际提交到交易所
-        
-        Args:
-            symbol: 交易对符号，如'btc5l_usdt'
-            clientOrderId: 客户端订单ID
-            netvalue: 净值价格，用作订单簿中间价
-            env: 环境标识，目前只支持'qa'测试环境
-            ordermanager: 订单管理器（已弃用参数）
-            
-        Note:
-            该方法只在qa环境下生效，用于测试做市策略
-        """
-        if env == "qa":
-            # make fake orders first
-            fake_batch_order_bid, fake_batch_order_ask = get_orderbook(
-                mid_price=netvalue
-            )
-
-            fake_data = []
-            for fake_order in fake_batch_order_bid + fake_batch_order_ask:
-                order_data = {
-                    "symbol": symbol,
-                    "clientOrderId": self.order_manager.create_temp_id(),
-                    "side": SIDE_SELL if fake_order["direction"] == "ask" else SIDE_BUY,
-                    "type": ORDER_TYPE_LIMIT,
-                    "timeInForce": TIME_IN_FORCE_GTC,
-                    "bizType": BIZ_TYPE_SPOT,
-                    "price": fake_order["price"],
-                    "quantity": fake_order["amount"],
-                    "quoteQty": None,
-                }
-                fake_data.append(order_data)
-
-            res = self.order_manager.add_orders_batch(fake_data, batch_id=DEFAULT_BATCH_ID)
+    # ❌ make_orders() 方法已于 2025-11-21 移除
+    #
+    # 移除原因：
+    # 1. 该方法用于在QA环境生成假订单，增加了代码复杂度
+    # 2. 与真实做市逻辑混淆，容易引起误解
+    # 3. pre_make_orders 配置一直为 false，从未在生产中使用
+    # 4. 测试需求可以通过单元测试或真实订单满足
+    #
+    # 如需恢复此功能，请查看 git 历史记录
 
 
     def place_orders(
@@ -254,8 +218,12 @@ class MarketMaker:
             cancel_orders = []
             add_orders = []
 
+            # ✅ 传入最小订单金额，确保生成的订单符合交易所要求
+            min_order_value = self.order_manager.get_min_order_value(symbol) if hasattr(self.order_manager, 'get_min_order_value') else 1.2
             batch_order_bid, batch_order_ask = get_orderbook(
-                mid_price=netvalue, bid_ask_spread=config["bid_ask_spread"]
+                mid_price=netvalue, 
+                bid_ask_spread=config["bid_ask_spread"],
+                min_order_value=min_order_value
             )
 
             goal_orders = batch_order_ask + batch_order_bid
