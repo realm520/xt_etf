@@ -55,13 +55,17 @@ def load_strategy_config(
     return config["strategies"][strategy_name]
 
 
+def get_available_strategies(config_file: str = "config/strategies.yaml") -> list:
+    """从配置文件动态获取所有可用策略"""
+    config = load_config(config_file)
+    return list(config.get("strategies", {}).keys())
+
+
 def get_strategy_params(strategy_name: str) -> Dict[str, Any]:
     """根据策略名称获取净值计算参数"""
-    # 支持的策略列表
-    supported_strategies = ["stg3l", "stg3s", "stg5l", "stg5s", "ton3l"]
-
-    if strategy_name not in supported_strategies:
-        raise ValueError(f"不支持的策略: {strategy_name}，支持的策略: {supported_strategies}")
+    # 从策略名称解析参数（约定：{symbol}{leverage}{direction}）
+    # 例如: stg3l -> symbol=stg, leverage=3, direction=l
+    #      ton3s -> symbol=ton, leverage=3, direction=s
 
     # 提取杠杆倍数和方向
     leverage = int(strategy_name[3])  # 3 或 5
@@ -82,15 +86,18 @@ def get_strategy_params(strategy_name: str) -> Dict[str, Any]:
 
 def main():
     """主函数"""
+    # 首先获取可用策略列表（用于 argparse choices）
+    available_strategies = get_available_strategies()
+    
     parser = argparse.ArgumentParser(description="统一的ETF净值计算程序")
 
-    # 必需参数
+    # 必需参数 - 动态从配置文件读取策略列表
     parser.add_argument(
         "--strategy",
         type=str,
         required=True,
-        choices=["stg3l", "stg3s", "stg5l", "stg5s", "ton3l"],
-        help="策略名称 (stg3l/stg3s/stg5l/stg5s/ton3l)",
+        choices=available_strategies,
+        help=f"策略名称 (可用策略: {', '.join(available_strategies)})",
     )
 
     # 环境参数（用于区分QA/生产环境，虽然净值计算器不直接使用，但保持接口一致性）

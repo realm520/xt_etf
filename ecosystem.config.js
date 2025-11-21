@@ -96,6 +96,56 @@ module.exports = {
       time: true
     },
 
+    // TON 3倍杠杆做多策略 (QA环境)
+    {
+      name: 'etf-ton3l',
+      script: 'python',
+      args: 'run_etf.py --strategy ton3l --env qa',
+      cwd: '/Users/harry/code/xt_etf',
+      interpreter: 'none',
+      env: {
+        PYTHONPATH: '/Users/harry/code/xt_etf',
+        STRATEGY: 'ton3l',
+        ENV: 'qa'
+      },
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '1G',
+      max_restarts: 10,
+      min_uptime: '10s',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: 'logs/pm2/etf-ton3l-error.log',
+      out_file: 'logs/pm2/etf-ton3l-out.log',
+      merge_logs: true,
+      time: true
+    },
+
+    // TON 3倍杠杆做空策略 (QA环境)
+    {
+      name: 'etf-ton3s',
+      script: 'python',
+      args: 'run_etf.py --strategy ton3s --env qa',
+      cwd: '/Users/harry/code/xt_etf',
+      interpreter: 'none',
+      env: {
+        PYTHONPATH: '/Users/harry/code/xt_etf',
+        STRATEGY: 'ton3s',
+        ENV: 'qa'
+      },
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '1G',
+      max_restarts: 10,
+      min_uptime: '10s',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: 'logs/pm2/etf-ton3s-error.log',
+      out_file: 'logs/pm2/etf-ton3s-out.log',
+      merge_logs: true,
+      time: true
+    },
+
     // 净值计算服务
     {
       name: 'etf-net-value',

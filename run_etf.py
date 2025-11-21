@@ -6,6 +6,7 @@ from etf.xt import Spot
 from etf.stability_monitor import StabilityMonitor
 from etf.websocket import XTWebSocketClient
 from etf.symbol_config import SymbolConfigManager  # Symbol配置管理器
+from etf.natural_kline_simulator import NaturalKlineSimulator  # 自然K线模拟器
 from hedging import Hedge
 from etf.observability import init_otel, MetricsCollector  # OpenTelemetry 集成
 from etf.utils.logger import setup_logging  # 新增：统一日志配置工具
@@ -302,17 +303,33 @@ def load_strategy_config(strategy_name, config_file="config/strategies.yaml"):
         return {}
 
 
+def get_available_strategies(config_file="config/strategies.yaml"):
+    """从配置文件动态获取所有可用策略"""
+    if not os.path.exists(config_file):
+        return []
+    try:
+        with open(config_file, "r", encoding="utf8") as f:
+            config_data = yaml.safe_load(f)
+        return list(config_data.get("strategies", {}).keys())
+    except Exception as e:
+        logging.error(f"Error loading strategies from config: {e}")
+        return []
+
+
 def get_parser():
+    # 动态获取可用策略
+    available_strategies = get_available_strategies()
+    
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    # 新增策略相关参数
+    # 新增策略相关参数 - 动态从配置文件读取
     parser.add_argument(
         "--strategy",
         type=str,
-        choices=["ton3l", "stg3l", "stg3s", "stg5l", "stg5s"],
-        help="Use predefined strategy from config file.",
+        choices=available_strategies if available_strategies else None,
+        help=f"Use predefined strategy from config file. Available: {', '.join(available_strategies) if available_strategies else 'none'}",
     )
     parser.add_argument(
         "--config",
@@ -551,6 +568,11 @@ if __name__ == "__main__":
     # 添加 currencies 从策略配置
     if "currencies" in strategy_config:
         config["currencies"] = strategy_config["currencies"]
+
+    # 添加 natural_kline 配置
+    if "natural_kline" in strategy_config:
+        config["natural_kline"] = strategy_config["natural_kline"]
+        logging.info(f"✅ 自然K线配置已加载: enabled={strategy_config['natural_kline'].get('enabled', False)}")
 
     # 添加策略名称用于特殊处理
     if args.strategy:
@@ -833,11 +855,25 @@ if __name__ == "__main__":
             target=wash_controller.run, args=(risk_controller, config), daemon=True
         )
 
+    # 自然K线模拟器（新增）
+    natural_kline_config = config.get("natural_kline", {})
+    if natural_kline_config.get("enabled", False):
+        natural_kline_simulator = NaturalKlineSimulator(order_manager, config)
+        thread5 = threading.Thread(
+            target=natural_kline_simulator.run, daemon=True
+        )
+        logging.info("自然K线模拟器已配置")
+
     # thread2.start()
     if config["Enable_hedging"]:
         thread3.start()
     if config["Enable_wash_trading"]:
         thread4.start()
+
+    # 启动自然K线模拟器
+    if natural_kline_config.get("enabled", False):
+        thread5.start()
+        logging.info("自然K线模拟器线程已启动")
 
     # thread2.join()
     # if config["Enable_hedging"]:
