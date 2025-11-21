@@ -56,16 +56,7 @@ strategies:
       cooldown: 60           # 止损后冷却时间（分钟）
       enable_partial_close: true  # 是否启用部分平仓
 
-    # ✅ 自然K线模拟器配置（优化后）
-    natural_kline:
-      enabled: true                   # 是否启用自然K线模拟
-      kline_period: 60                # K线周期（秒），默认1分钟
-      avg_trades_per_period: 8        # 每个周期平均交易次数（从3增加到8）
-      volatility: 0.005               # 年化波动率（从0.2%增加到0.5%）
-      min_trade_amount: 8             # 最小交易金额（USDT，从5增加到8）
-      max_price_change_pct: 0.02      # 单笔最大价格变化（从1%增加到2%）
-    
-    # 资金检查配置（新增）
+    # 资金检查配置
     balance_check:
       enabled: true                   # 是否启用资金检查
       warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
@@ -128,16 +119,7 @@ strategies:
       cooldown: 60           # 止损后冷却时间（分钟）
       enable_partial_close: true  # 是否启用部分平仓
 
-    # ✅ 自然K线模拟器配置（优化后）
-    natural_kline:
-      enabled: true                   # 是否启用自然K线模拟
-      kline_period: 60                # K线周期（秒），默认1分钟
-      avg_trades_per_period: 8        # 每个周期平均交易次数（从3增加到8）
-      volatility: 0.005               # 年化波动率（从0.2%增加到0.5%）
-      min_trade_amount: 8             # 最小交易金额（USDT，从5增加到8）
-      max_price_change_pct: 0.02      # 单笔最大价格变化（从1%增加到2%）
-    
-    # 资金检查配置（新增）
+    # 资金检查配置
     balance_check:
       enabled: true                   # 是否启用资金检查
       warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
@@ -199,16 +181,7 @@ strategies:
       cooldown: 60           # 止损后冷却时间（分钟）
       enable_partial_close: true  # 是否启用部分平仓
 
-    # 自然K线模拟器配置
-    natural_kline:
-      enabled: true
-      kline_period: 60
-      avg_trades_per_period: 3
-      volatility: 0.002
-      min_trade_amount: 5
-      max_price_change_pct: 0.01
-
-    # 资金检查配置（新增）
+    # 资金检查配置
     balance_check:
       enabled: true                   # 是否启用资金检查
       warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
@@ -270,16 +243,7 @@ strategies:
       cooldown: 60           # 止损后冷却时间（分钟）
       enable_partial_close: true  # 是否启用部分平仓
 
-    # 自然K线模拟器配置
-    natural_kline:
-      enabled: true
-      kline_period: 60
-      avg_trades_per_period: 3
-      volatility: 0.002
-      min_trade_amount: 5
-      max_price_change_pct: 0.01
-
-    # 资金检查配置（新增）
+    # 资金检查配置
     balance_check:
       enabled: true                   # 是否启用资金检查
       warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
@@ -341,16 +305,7 @@ strategies:
       cooldown: 60           # 止损后冷却时间（分钟）
       enable_partial_close: true  # 是否启用部分平仓
 
-    # 自然K线模拟器配置
-    natural_kline:
-      enabled: true
-      kline_period: 60
-      avg_trades_per_period: 3
-      volatility: 0.002
-      min_trade_amount: 5
-      max_price_change_pct: 0.01
-
-    # 资金检查配置（新增）
+    # 资金检查配置
     balance_check:
       enabled: true                   # 是否启用资金检查
       warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
@@ -412,16 +367,7 @@ strategies:
       cooldown: 60           # 止损后冷却时间（分钟）
       enable_partial_close: true  # 是否启用部分平仓
 
-    # 自然K线模拟器配置
-    natural_kline:
-      enabled: true
-      kline_period: 60
-      avg_trades_per_period: 3
-      volatility: 0.002
-      min_trade_amount: 5
-      max_price_change_pct: 0.01
-    
-    # 资金检查配置（新增）
+    # 资金检查配置
     balance_check:
       enabled: true                   # 是否启用资金检查
       warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
@@ -476,6 +422,3 @@ database:
   # 订单记录器配置（已有）
   order_persistence:
     enabled: false          # 当前使用CSV降级（TODO: 实施PostgreSQL集成）
-
-# 全局自然K线配置（可被各策略覆盖）
-# 此配置已应用到所有策略的 natural_kline 部分
