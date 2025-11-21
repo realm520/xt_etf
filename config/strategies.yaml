@@ -29,7 +29,7 @@ strategies:
     Enable_hedging: false
     Enable_market_making: true
     cancel_all_open_orders: true
-    pre_make_orders: false
+    # ❌ pre_make_orders: false  # 已废弃 (2025-11-21)
     Exit_with_cancel_all_open_orders: false
 
     # 交易参数
@@ -56,14 +56,22 @@ strategies:
       cooldown: 60           # 止损后冷却时间（分钟）
       enable_partial_close: true  # 是否启用部分平仓
 
-    # 自然K线模拟器配置（新增）
+    # ✅ 自然K线模拟器配置（优化后）
     natural_kline:
       enabled: true                   # 是否启用自然K线模拟
       kline_period: 60                # K线周期（秒），默认1分钟
-      avg_trades_per_period: 3        # 每个周期平均交易次数
-      volatility: 0.002               # 年化波动率（0.2%）
-      min_trade_amount: 5             # 最小交易金额（USDT）
-      max_price_change_pct: 0.01      # 单笔最大价格变化（1%）
+      avg_trades_per_period: 8        # 每个周期平均交易次数（从3增加到8）
+      volatility: 0.005               # 年化波动率（从0.2%增加到0.5%）
+      min_trade_amount: 8             # 最小交易金额（USDT，从5增加到8）
+      max_price_change_pct: 0.02      # 单笔最大价格变化（从1%增加到2%）
+    
+    # 资金检查配置（新增）
+    balance_check:
+      enabled: true                   # 是否启用资金检查
+      warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
+      critical_threshold: 0.2         # 危急阈值（剩余资金比例20%）
+      insufficient_threshold: 0.1     # 不足阈值（剩余资金比例10%）
+      check_interval: 60              # 检查间隔（秒）
 
 
   ton3s:
@@ -93,7 +101,7 @@ strategies:
     Enable_hedging: false
     Enable_market_making: true
     cancel_all_open_orders: true
-    pre_make_orders: false
+    # ❌ pre_make_orders: false  # 已废弃 (2025-11-21)
     Exit_with_cancel_all_open_orders: false
 
     # 交易参数
@@ -120,14 +128,22 @@ strategies:
       cooldown: 60           # 止损后冷却时间（分钟）
       enable_partial_close: true  # 是否启用部分平仓
 
-    # 自然K线模拟器配置（新增）
+    # ✅ 自然K线模拟器配置（优化后）
     natural_kline:
       enabled: true                   # 是否启用自然K线模拟
       kline_period: 60                # K线周期（秒），默认1分钟
-      avg_trades_per_period: 3        # 每个周期平均交易次数
-      volatility: 0.002               # 年化波动率（0.2%）
-      min_trade_amount: 5             # 最小交易金额（USDT）
-      max_price_change_pct: 0.01      # 单笔最大价格变化（1%）
+      avg_trades_per_period: 8        # 每个周期平均交易次数（从3增加到8）
+      volatility: 0.005               # 年化波动率（从0.2%增加到0.5%）
+      min_trade_amount: 8             # 最小交易金额（USDT，从5增加到8）
+      max_price_change_pct: 0.02      # 单笔最大价格变化（从1%增加到2%）
+    
+    # 资金检查配置（新增）
+    balance_check:
+      enabled: true                   # 是否启用资金检查
+      warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
+      critical_threshold: 0.2         # 危急阈值（剩余资金比例20%）
+      insufficient_threshold: 0.1     # 不足阈值（剩余资金比例10%）
+      check_interval: 60              # 检查间隔（秒）
 
   stg3l:
     # 基础配置
@@ -156,7 +172,7 @@ strategies:
     Enable_hedging: false
     Enable_market_making: true
     cancel_all_open_orders: false
-    pre_make_orders: false
+    # ❌ pre_make_orders: false  # 已废弃 (2025-11-21)
     Exit_with_cancel_all_open_orders: false
 
     # 交易参数
@@ -192,6 +208,14 @@ strategies:
       min_trade_amount: 5
       max_price_change_pct: 0.01
 
+    # 资金检查配置（新增）
+    balance_check:
+      enabled: true                   # 是否启用资金检查
+      warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
+      critical_threshold: 0.2         # 危急阈值（剩余资金比例20%）
+      insufficient_threshold: 0.1     # 不足阈值（剩余资金比例10%）
+      check_interval: 60              # 检查间隔（秒）
+
   stg3s:
     # 基础配置
     prefix: "stg3s"
@@ -219,7 +243,7 @@ strategies:
     Enable_hedging: false
     Enable_market_making: true
     cancel_all_open_orders: false
-    pre_make_orders: false
+    # ❌ pre_make_orders: false  # 已废弃 (2025-11-21)
     Exit_with_cancel_all_open_orders: false
 
     # 交易参数
@@ -255,6 +279,14 @@ strategies:
       min_trade_amount: 5
       max_price_change_pct: 0.01
 
+    # 资金检查配置（新增）
+    balance_check:
+      enabled: true                   # 是否启用资金检查
+      warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
+      critical_threshold: 0.2         # 危急阈值（剩余资金比例20%）
+      insufficient_threshold: 0.1     # 不足阈值（剩余资金比例10%）
+      check_interval: 60              # 检查间隔（秒）
+
   stg5l:
     # 基础配置
     prefix: "stg5l"
@@ -282,7 +314,7 @@ strategies:
     Enable_hedging: false
     Enable_market_making: true
     cancel_all_open_orders: true    # STG5L 特有：启动时取消所有订单
-    pre_make_orders: false
+    # ❌ pre_make_orders: false  # 已废弃 (2025-11-21)
     Exit_with_cancel_all_open_orders: false
 
     # 交易参数
@@ -318,6 +350,14 @@ strategies:
       min_trade_amount: 5
       max_price_change_pct: 0.01
 
+    # 资金检查配置（新增）
+    balance_check:
+      enabled: true                   # 是否启用资金检查
+      warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
+      critical_threshold: 0.2         # 危急阈值（剩余资金比例20%）
+      insufficient_threshold: 0.1     # 不足阈值（剩余资金比例10%）
+      check_interval: 60              # 检查间隔（秒）
+
   stg5s:
     # 基础配置
     prefix: "stg5s"
@@ -345,7 +385,7 @@ strategies:
     Enable_hedging: false
     Enable_market_making: true
     cancel_all_open_orders: false
-    pre_make_orders: false
+    # ❌ pre_make_orders: false  # 已废弃 (2025-11-21)
     Exit_with_cancel_all_open_orders: false
 
     # 交易参数
@@ -380,6 +420,14 @@ strategies:
       volatility: 0.002
       min_trade_amount: 5
       max_price_change_pct: 0.01
+    
+    # 资金检查配置（新增）
+    balance_check:
+      enabled: true                   # 是否启用资金检查
+      warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
+      critical_threshold: 0.2         # 危急阈值（剩余资金比例20%）
+      insufficient_threshold: 0.1     # 不足阈值（剩余资金比例10%）
+      check_interval: 60              # 检查间隔（秒）
 
 # ========================================
 # 全局配置
