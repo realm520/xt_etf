@@ -90,16 +90,11 @@ class EtfStrategy:
                     or config.get("prefix") == "stg5s"
                 ):
                     logging.info("finish cancel_all_open_orders")
-                # market_maker.make_orders(config["symbol"])
         else:
             logging.info("skip cancel_all_open_orders")
 
-        if config["pre_make_orders"]:
-            logging.info("pre_make_orders")
-            if len(depth["asks"]) == 0 or len(depth["bids"]) == 0:
-                market_maker.make_orders()
-        else:
-            logging.info("skip pre_make_orders")
+        # ❌ pre_make_orders 功能已移除 (2025-11-21)
+        # 原因: make_orders() 方法已废弃，该配置项不再使用
 
         # try:
 
@@ -386,12 +381,13 @@ def get_parser():
         default=True,
         help="Cancel all open orders before exit.",
     )
-    parser.add_argument(
-        "--pre-make-orders",
-        type=str2bool,
-        default=False,
-        help="Make pre-orders before market making.",
-    )
+    # ❌ --pre-make-orders 参数已废弃 (2025-11-21)
+    # parser.add_argument(
+    #     "--pre-make-orders",
+    #     type=str2bool,
+    #     default=False,
+    #     help="Make pre-orders before market making.",
+    # )
     parser.add_argument(
         "--hedging-interval", type=int, default=20, help="Hedging interval in seconds."
     )
@@ -524,9 +520,10 @@ if __name__ == "__main__":
         "cancel_all_open_orders": args.cancel_all_open_orders
         if args.cancel_all_open_orders != parser.get_default("cancel_all_open_orders")
         else strategy_config.get("cancel_all_open_orders", args.cancel_all_open_orders),
-        "pre_make_orders": args.pre_make_orders
-        if args.pre_make_orders != parser.get_default("pre_make_orders")
-        else strategy_config.get("pre_make_orders", args.pre_make_orders),
+        # ❌ pre_make_orders 已废弃 (2025-11-21)
+        # "pre_make_orders": args.pre_make_orders
+        # if args.pre_make_orders != parser.get_default("pre_make_orders")
+        # else strategy_config.get("pre_make_orders", args.pre_make_orders),
         "leverage": args.leverage
         if args.leverage != parser.get_default("leverage")
         else strategy_config.get("leverage", args.leverage),
@@ -763,6 +760,19 @@ if __name__ == "__main__":
     # 传递策略名称和Symbol配置管理器给 OrderManager
     order_manager = OrderManager(spot, strategy_name=strategy_name, symbol_config=symbol_config_manager)
     
+    # 启用资金检查（如果配置中启用）
+    balance_check_config = config.get("balance_check", {})
+    if balance_check_config.get("enabled", False):
+        order_manager.enable_balance_check(
+            warning_threshold=balance_check_config.get("warning_threshold", 0.3),
+            critical_threshold=balance_check_config.get("critical_threshold", 0.2),
+            insufficient_threshold=balance_check_config.get("insufficient_threshold", 0.1),
+            check_interval=balance_check_config.get("check_interval", 60),
+        )
+        logging.info(f"✅ [{strategy_name}] 资金检查已启用")
+    else:
+        logging.info(f"ℹ️ [{strategy_name}] 资金检查未启用")
+    
     # 初始化稳定性监控
     stability_monitor = StabilityMonitor(strategy_name=strategy_name, check_interval=60)
     # TODO: stability_monitor.start_monitoring() 需要异步事件循环
@@ -842,7 +852,7 @@ if __name__ == "__main__":
                 depth = {"bids": [], "asks": []}
         logging.info(depth)
 
-        # market_maker.make_orders(symbol=config["symbol"])
+        # ❌ make_orders 已废弃 (2025-11-21)
         hedging = Hedge()
 
     # thread2 = threading.Thread(target=EtfStrategy.run, args=(config, risk_controller, wash_controller, market_maker))

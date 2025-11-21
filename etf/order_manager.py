@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 from copy import deepcopy
 import asyncio
 import threading
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from functools import wraps
 from etf.alert import send_alert, AlertLevel
 from etf.utils.common import get_mid_price
@@ -22,11 +22,13 @@ from etf.utils.order_errors import (
 # 导入订单记录器
 try:
     from etf.storage import get_order_recorder
-
     ORDER_RECORDER_AVAILABLE = True
 except ImportError:
     ORDER_RECORDER_AVAILABLE = False
     logging.warning("订单记录器未安装，将只使用CSV记录")
+
+# 导入资金检查器
+from etf.balance_checker import BalanceChecker, BalanceStatus
 
 
 def retry_on_failure(max_retries: int = 3, delay: float = 1.0, backoff: float = 2.0):
@@ -172,6 +174,12 @@ class OrderManager:
         except Exception as e:
             logging.warning(f"Redis 连接失败，黑名单功能将被禁用: {e}")
             self.redis_client = None
+        
+        # 初始化资金检查器（默认关闭，通过配置启用）
+        self.balance_checker = None
+        self.balance_check_enabled = False
+        self.last_balance_check_time = 0
+        self.balance_check_interval = 60  # 默认每60秒检查一次
 
     def _init_recorder_loop(self):
         """初始化后台事件循环用于异步操作"""
@@ -214,6 +222,106 @@ class OrderManager:
 
         if not self._recorder_running:
             logging.warning("订单记录器后台循环启动超时")
+
+    def enable_balance_check(
+        self,
+        warning_threshold: float = 0.3,
+        critical_threshold: float = 0.2,
+        insufficient_threshold: float = 0.1,
+        check_interval: int = 60,
+    ):
+        """
+        启用资金检查功能
+        
+        Args:
+            warning_threshold: 警告阈值（剩余资金比例）
+            critical_threshold: 危急阈值（剩余资金比例）
+            insufficient_threshold: 不足阈值（剩余资金比例）
+            check_interval: 检查间隔（秒）
+        """
+        self.balance_checker = BalanceChecker(
+            strategy_name=self.strategy_name,
+            warning_threshold=warning_threshold,
+            critical_threshold=critical_threshold,
+            insufficient_threshold=insufficient_threshold,
+        )
+        self.balance_check_enabled = True
+        self.balance_check_interval = check_interval
+        logging.info(
+            f"[{self.strategy_name}] 资金检查已启用 "
+            f"(警告:{warning_threshold*100}%, 危急:{critical_threshold*100}%, "
+            f"不足:{insufficient_threshold*100}%, 间隔:{check_interval}秒)"
+        )
+    
+    def check_balance_before_order(
+        self,
+        symbol: str,
+        force_check: bool = False,
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        下单前检查资金是否充足
+        
+        Args:
+            symbol: 交易对
+            force_check: 是否强制检查（忽略时间间隔）
+            
+        Returns:
+            (can_place_order, message): (是否可以下单, 详细信息)
+        """
+        import time
+        
+        # 未启用资金检查
+        if not self.balance_check_enabled or self.balance_checker is None:
+            return True, None
+        
+        # 检查时间间隔
+        current_time = time.time()
+        if not force_check and (current_time - self.last_balance_check_time) < self.balance_check_interval:
+            return True, None
+        
+        try:
+            # 获取余额信息
+            balance_info = self.balance_checker.get_balance_info(self.client, "usdt")
+            available_balance = balance_info.get("available", 0.0)
+            total_balance = balance_info.get("balance", 0.0)
+            
+            # 计算挂单占用金额
+            pending_order_value = self.balance_checker.calculate_pending_order_value(
+                self.open_orders,
+                symbol,
+            )
+            
+            # 检查资金状态
+            status, message = self.balance_checker.check_balance(
+                available_balance=available_balance,
+                total_balance=total_balance,
+                pending_order_value=pending_order_value,
+            )
+            
+            # 更新检查时间
+            self.last_balance_check_time = current_time
+            
+            # 判断是否应该停止策略
+            should_stop = self.balance_checker.should_stop_strategy(status)
+            
+            if should_stop:
+                logging.critical(
+                    f"[{self.strategy_name}] 资金不足，建议停止策略！{message}"
+                )
+                return False, message
+            elif status in [BalanceStatus.CRITICAL, BalanceStatus.WARNING]:
+                logging.warning(
+                    f"[{self.strategy_name}] 资金状态异常: {message}"
+                )
+                return True, message
+            else:
+                # 状态正常，只在首次或状态变化时记录
+                return True, None
+                
+        except Exception as e:
+            logging.error(f"[{self.strategy_name}] 资金检查失败: {e}")
+            # 检查失败时不阻止下单，但记录错误
+            return True, f"资金检查失败: {e}"
 
     def _schedule_async(self, coro):
         """
@@ -426,6 +534,38 @@ class OrderManager:
         # self.orders[temp_id] = Order(order_data)
         return temp_id  # 返回临时 ID
 
+    def get_min_order_value(self, symbol: str) -> float:
+        """
+        获取Symbol的最小订单金额（USDT）
+        
+        优先级:
+        1. Symbol配置管理器中的minOrderAmt（最准确）
+        2. 默认值1.2 USDT
+        
+        Args:
+            symbol: 交易对符号，如'TON3LUSDT'
+            
+        Returns:
+            float: 最小订单金额（USDT）
+        """
+        try:
+            # 从Symbol配置管理器获取
+            if self.symbol_config:
+                config = self.symbol_config.get_symbol_config(symbol)
+                if config:
+                    min_order_amt = config.get("minOrderAmt")
+                    if min_order_amt:
+                        # 返回最小金额 + 20%余量（与OrderManager内部逻辑保持一致）
+                        return float(min_order_amt) * 1.2
+            
+            # 降级：返回默认值
+            logging.debug(f"使用默认最小订单金额: 1.2 USDT (Symbol: {symbol})")
+            return 1.2
+            
+        except Exception as e:
+            logging.warning(f"获取{symbol}最小订单金额失败: {e}，使用默认值1.2")
+            return 1.2
+
     def remove_order(self, orderid):
         if orderid in self.open_orders:
             del self.open_orders[orderid]
@@ -536,6 +676,17 @@ class OrderManager:
     def add_orders_batch(self, order_data, batch_id=None, is_wash_trading=False):
         if not self._check_circuit_breaker():
             return None
+        
+        # 下单前检查资金是否充足
+        if len(order_data) > 0:
+            symbol = order_data[0].get("symbol")
+            can_place_order, balance_message = self.check_balance_before_order(symbol)
+            
+            if not can_place_order:
+                logging.critical(
+                    f"[{self.strategy_name}] 资金不足，取消下单！{balance_message}"
+                )
+                return None
 
         # ✅ 格式化和验证批量订单参数（如果Symbol配置管理器可用）
         if self.symbol_config:
