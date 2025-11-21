@@ -235,6 +235,19 @@ class WashController:
 
         last_mid_price = mid_price
 
+        # ✅ 计算买卖价差（±0.1% - 0.3%随机扰动）
+        price_offset_pct = random.uniform(0.001, 0.003)  # 0.1%-0.3%
+        price_offset = mid_price * price_offset_pct
+        
+        # 买单价格低于中间价，卖单价格高于中间价
+        buy_price = round(mid_price - price_offset, prec)
+        sell_price = round(mid_price + price_offset, prec)
+        
+        logging.debug(
+            f"洗盘价格分布: 买={buy_price:.{prec}f} | 中={mid_price:.{prec}f} | "
+            f"卖={sell_price:.{prec}f} | 价差={price_offset_pct*100:.2f}%"
+        )
+        
         rd = random.randint(0, 1)
         try:
             buy_data = [
@@ -245,7 +258,7 @@ class WashController:
                     "type": ORDER_TYPE_LIMIT,
                     "timeInForce": TIME_IN_FORCE_GTC,
                     "bizType": BIZ_TYPE_SPOT,
-                    "price": round(mid_price, prec),
+                    "price": buy_price,  # ✅ 使用买入价
                     "quantity": amount,
                     "quoteQty": None,
                 }
@@ -262,7 +275,7 @@ class WashController:
                     "type": ORDER_TYPE_LIMIT,
                     "timeInForce": TIME_IN_FORCE_GTC,
                     "bizType": BIZ_TYPE_SPOT,
-                    "price": round(mid_price, prec),
+                    "price": sell_price,  # ✅ 使用卖出价
                     "quantity": amount,
                     "quoteQty": None,
                 }
