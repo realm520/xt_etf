@@ -54,6 +54,108 @@ class WashController:
             db=DEFAULT_REDIS_DB
         )
 
+    def calculate_smart_volume(
+        self,
+        mid_price: float,
+        last_mid_price: float,
+        min_volume: float = 5,
+        max_volume: float = 200
+    ) -> float:
+        """
+        智能计算交易量（基于多因子模型）
+        
+        考虑因素：
+        1. 波动率基础量
+        2. 价格趋势因子
+        3. 做市活跃度因子
+        4. 幂律分布随机扰动
+        
+        Args:
+            mid_price: 当前中间价
+            last_mid_price: 上一个中间价
+            min_volume: 最小交易量
+            max_volume: 最大交易量
+            
+        Returns:
+            float: 智能计算的交易量
+        """
+        # 1. 计算波动率并确定基础量
+        if len(self.returns) > 0:
+            volatility = abs(self.returns[-1])
+        else:
+            volatility = abs((mid_price - last_mid_price) / last_mid_price) if last_mid_price > 0 else 0
+        
+        if volatility < 0.001:  # 极低波动 (<0.1%)
+            base_volume = 5
+        elif volatility < 0.005:  # 低波动 (<0.5%)
+            base_volume = 15
+        elif volatility < 0.01:  # 中等波动 (<1%)
+            base_volume = 30
+        else:  # 高波动 (≥1%)
+            base_volume = 50
+        
+        # 2. 价格趋势因子
+        price_change = mid_price - last_mid_price
+        if price_change > 0:
+            # 上涨趋势：增加交易量（1.5-2.5倍）
+            trend_factor = np.random.uniform(1.5, 2.5)
+        else:
+            # 下跌趋势：减少交易量（0.5-0.8倍）
+            trend_factor = np.random.uniform(0.5, 0.8)
+        
+        # 3. 做市活跃度因子（基于最近60秒成交数）
+        recent_fills = self.order_manager.get_recent_fills_count(60)
+        if recent_fills > 10:
+            # 高活跃：增加洗盘量
+            activity_factor = 1.5
+        elif recent_fills > 5:
+            # 中等活跃
+            activity_factor = 1.2
+        else:
+            # 低活跃：减少洗盘量
+            activity_factor = 0.8
+        
+        # 4. 幂律分布扰动（Pareto分布，α=2）
+        # 产生长尾分布，避免简单随机导致的平均值收敛
+        power_law_factor = np.random.pareto(2.0) + 1  # +1 确保最小值为1
+        
+        # 5. 计算最终交易量
+        final_volume = base_volume * trend_factor * activity_factor * power_law_factor
+        
+        # 6. 限制范围
+        final_volume = np.clip(final_volume, min_volume, max_volume)
+        
+        logging.debug(
+            f"智能交易量计算: 波动率={volatility:.4f}, 基础量={base_volume}, "
+            f"趋势因子={trend_factor:.2f}, 活跃度因子={activity_factor:.2f}, "
+            f"幂律因子={power_law_factor:.2f}, 最终量={final_volume:.2f}"
+        )
+        
+        return final_volume
+    
+    def get_next_interval(self, lambda_rate: float = 10) -> float:
+        """
+        获取下一次洗盘交易的等待时间（泊松分布）
+        
+        使用指数分布生成泊松过程的时间间隔，产生更自然的时间分布
+        
+        Args:
+            lambda_rate: 平均间隔（秒），默认10秒
+            
+        Returns:
+            float: 下一次等待时间（秒），范围限制在3-20秒
+        """
+        # 指数分布：模拟泊松过程的到达时间
+        interval = np.random.exponential(scale=lambda_rate)
+        
+        # 限制范围：最小3秒，最大20秒
+        # 确保1分钟内至少3笔，最多20笔
+        interval = np.clip(interval, 3, 20)
+        
+        logging.debug(f"泊松分布生成间隔: {interval:.2f}秒")
+        
+        return interval
+
     @performance_monitor.time_function("wash_trading")
     def wash(
         self,
@@ -112,23 +214,20 @@ class WashController:
             mid_price = new_mid_price
             self.returns = [(mid_price - last_mid_price) / last_mid_price]
 
-        price_change = mid_price - last_mid_price
-        amount = (
-            np.random.randint(1, self.max_trade_amount)
-            if price_change > 0
-            else np.random.randint(1, self.max_trade_amount // 3)
-        )
+        # ✅ 使用智能交易量计算替代简单随机
+        amount = self.calculate_smart_volume(mid_price, last_mid_price)
 
         volatility = self.returns[-1]
         if volatility > 0.01:
             logging.info(f"volatility {volatility} too high, skipping order")
             return mid_price
 
-        # 确保最小交易价值
+        # 确保最小交易价值（已在calculate_smart_volume中处理，但再次确认）
         if mid_price * amount < DEFAULT_MIN_TRADE_VALUE:
             amount = DEFAULT_MIN_TRADE_VALUE / mid_price
 
-        amount = round(amount + random.uniform(0, 1), prec_amount)
+        amount = round(amount, prec_amount)
+        price_change = mid_price - last_mid_price
         logging.info(f"price change {price_change}, by tick {price_change / tick}")
         logging.info(
             f"sending orders with amount {amount}, volatility {volatility}, and price {mid_price}"
@@ -278,8 +377,13 @@ class WashController:
         # For initialization
         last_mid_price = self.get_washing_price(config)
 
+        # ✅ 获取泊松分布参数（从配置中读取，默认10秒）
+        lambda_rate = config.get("washing_lambda", 10)
+
         while True:
-            time.sleep(random.randint(5, 10))
+            # ✅ 使用泊松分布生成动态间隔
+            wait_time = self.get_next_interval(lambda_rate)
+            time.sleep(wait_time)
 
             # For each washing trade
             mid_price = self.get_washing_price(config)

@@ -142,6 +142,10 @@ class OrderManager:
 
         # heding
         self.exposure = {"price": 0, "amount": 0, "value": 0}
+        
+        # ✅ 新增：成交追踪（用于洗盘交易智能调整）
+        self.recent_fills = []  # [(timestamp, volume, price), ...]
+        self.fill_window = 60   # 统计窗口：60秒
 
         # 初始化订单记录器
         if ORDER_RECORDER_AVAILABLE:
@@ -179,7 +183,7 @@ class OrderManager:
         self.balance_checker = None
         self.balance_check_enabled = False
         self.last_balance_check_time = 0
-        self.balance_check_interval = 60  # 默认每60秒检查一次
+        self.balance_check_interval = 60  # 默认每60秒检查一次  # 默认每60秒检查一次
 
     def _init_recorder_loop(self):
         """初始化后台事件循环用于异步操作"""
@@ -551,7 +555,7 @@ class OrderManager:
         try:
             # 从Symbol配置管理器获取
             if self.symbol_config:
-                config = self.symbol_config.get_symbol_config(symbol)
+                config = self.symbol_config.get_config(symbol)
                 if config:
                     min_order_amt = config.get("minOrderAmt")
                     if min_order_amt:
@@ -1087,6 +1091,65 @@ class OrderManager:
 
         self.canceled_orders = []
         self.filled_orders = []
+
+    def get_recent_fills_count(self, window_seconds: int = 60) -> int:
+        """
+        获取最近N秒内的成交笔数（用于洗盘交易智能调整）
+        
+        Args:
+            window_seconds: 统计窗口（秒），默认60秒
+            
+        Returns:
+            int: 成交笔数
+        """
+        import time
+        current_time = time.time()
+        cutoff_time = current_time - window_seconds
+        
+        # 清理过期记录
+        self.recent_fills = [
+            (ts, vol, price) for ts, vol, price in self.recent_fills 
+            if ts > cutoff_time
+        ]
+        
+        return len(self.recent_fills)
+    
+    def get_recent_fills_volume(self, window_seconds: int = 60) -> float:
+        """
+        获取最近N秒内的总成交量
+        
+        Args:
+            window_seconds: 统计窗口（秒），默认60秒
+            
+        Returns:
+            float: 总成交量
+        """
+        import time
+        current_time = time.time()
+        cutoff_time = current_time - window_seconds
+        
+        total_volume = sum(
+            vol for ts, vol, price in self.recent_fills 
+            if ts > cutoff_time
+        )
+        
+        return total_volume
+    
+    def record_fill(self, volume: float, price: float):
+        """
+        记录一笔成交（供洗盘交易使用）
+        
+        Args:
+            volume: 成交量
+            price: 成交价格
+        """
+        import time
+        self.recent_fills.append((time.time(), volume, price))
+        
+        # 限制列表长度，防止内存无限增长
+        # 保留最近100条记录（通常60秒内不会超过这个数量）
+        if len(self.recent_fills) > 100:
+            self.recent_fills = self.recent_fills[-100:]
         # self.sent_orders = {}
 
     def write_orders(self):
@@ -1327,6 +1390,9 @@ class OrderManager:
                         delta_position += deltaQty * float(res["price"])
                         cmu_deltaQty += deltaQty
 
+                        # ✅ 记录成交（用于洗盘交易智能调整）
+                        self.record_fill(abs(deltaQty), float(res["price"]))
+
                         current_time = time.time()
                         filled_order_data = {
                             "symbol": res["symbol"],
@@ -1496,6 +1562,9 @@ class OrderManager:
                         deltaQty = -1 * deltaQty if res["side"] == "SELL" else deltaQty
                         delta_position += deltaQty * float(res["price"])
                         cmu_deltaQty += deltaQty
+
+                        # ✅ 记录成交（用于洗盘交易智能调整）
+                        self.record_fill(abs(deltaQty), float(res["price"]))
 
                         self.trading_history.append({
                             "orderId": res["orderId"],
