@@ -20,8 +20,18 @@ strategies:
     # 时间间隔（秒）- 中低频优化
     sleep_interval: 10       # 主循环间隔
     Hedging_interval: 20
-    washing_interval: 30     # 洗盘间隔
+    washing_lambda: 10       # ✅ 洗盘平均间隔（秒）→ 1/10 = 10%/秒 → 1分钟约6次（确保K线数据充足）
     kline_continuity_interval: 60
+
+    # K线优化参数（新增）
+    kline_price_volatility: 0.001     # K线价格波动范围 ±0.1%
+    trend_switch_interval: 300        # 趋势切换间隔（秒） 5分钟
+    trend_up_prob: 0.15               # 上涨趋势概率 15%
+    trend_down_prob: 0.15             # 下跌趋势概率 15%
+    trend_oscillate_prob: 0.70        # 震荡概率 70%
+
+    # 分笔成交参数（方案3：最真实K线）
+    micro_trades_count: 4             # 每次洗盘的小单数量（默认随机3-5笔）
 
     # 功能开关
     Enable_risk_controller: true    # ✅ 启用风险控制器（3x杠杆）
@@ -38,6 +48,14 @@ strategies:
     anti_pin_usdt: 300
     anti_pin_rate: 0.2
     bid_ask_spread: 0.008    # 0.8% 价差
+
+    # ========== 订单簿算法配置 ==========
+    orderbook_algorithm: "natural"     # 使用自然盘口算法
+    orderbook_config:
+      total_budget: 10000.0            # 总预算 10000 USDT
+      layer: 500                       # 总档位500档（买250 + 卖250，对称）
+      extra_params:
+        naturalness: "high"            # 高自然度（95%真实性）
 
     # 净值计算参数
     net_value_interval: 1    # 净值更新间隔（秒）
@@ -83,8 +101,18 @@ strategies:
     # 时间间隔（秒）- 中低频优化
     sleep_interval: 10       # 主循环间隔
     Hedging_interval: 20
-    washing_interval: 30     # 洗盘间隔
+    washing_lambda: 10       # ✅ 洗盘平均间隔（秒）→ 1/10 = 10%/秒 → 1分钟约6次（确保K线数据充足）
     kline_continuity_interval: 60
+
+    # K线优化参数（新增）
+    kline_price_volatility: 0.001     # K线价格波动范围 ±0.1%
+    trend_switch_interval: 300        # 趋势切换间隔（秒） 5分钟
+    trend_up_prob: 0.15               # 上涨趋势概率 15%
+    trend_down_prob: 0.15             # 下跌趋势概率 15%
+    trend_oscillate_prob: 0.70        # 震荡概率 70%
+
+    # 分笔成交参数（方案3：最真实K线）
+    micro_trades_count: 4             # 每次洗盘的小单数量（默认随机3-5笔）
 
     # 功能开关
     Enable_risk_controller: true    # ✅ 启用风险控制器（3x杠杆）
@@ -101,6 +129,14 @@ strategies:
     anti_pin_usdt: 300
     anti_pin_rate: 0.2
     bid_ask_spread: 0.008    # 0.8% 价差
+
+    # ========== 订单簿算法配置 ==========
+    orderbook_algorithm: "natural"     # 使用自然盘口算法
+    orderbook_config:
+      total_budget: 10000.0            # 总预算 10000 USDT
+      layer: 500                       # 总档位500档（买250 + 卖250，对称）
+      extra_params:
+        naturalness: "high"            # 高自然度（95%真实性）
 
     # 净值计算参数
     net_value_interval: 1    # 净值更新间隔（秒）
@@ -164,6 +200,14 @@ strategies:
     anti_pin_rate: 0.2
     bid_ask_spread: 0.008    # 从1%改为0.8%，吸引真实交易
 
+    # ========== 订单簿算法配置 ==========
+    orderbook_algorithm: "natural"
+    orderbook_config:
+      total_budget: 10000.0
+      layer: 500
+      extra_params:
+        naturalness: "high"
+
     # 净值计算参数
     net_value_interval: 1    # 净值更新间隔（秒）
     init_net_value: 1.0      # 初始净值
@@ -225,6 +269,14 @@ strategies:
     anti_pin_usdt: 300
     anti_pin_rate: 0.2
     bid_ask_spread: 0.008    # 从1%改为0.8%，吸引真实交易
+
+    # ========== 订单簿算法配置 ==========
+    orderbook_algorithm: "natural"
+    orderbook_config:
+      total_budget: 10000.0
+      layer: 500
+      extra_params:
+        naturalness: "high"
 
     # 净值计算参数
     net_value_interval: 1    # 净值更新间隔（秒）
@@ -288,6 +340,14 @@ strategies:
     anti_pin_rate: 0.2
     bid_ask_spread: 0.015    # 从1%改为1.5%，高杠杆需要更大价差保护
 
+    # ========== 订单簿算法配置 ==========
+    orderbook_algorithm: "natural"
+    orderbook_config:
+      total_budget: 10000.0
+      layer: 500
+      extra_params:
+        naturalness: "high"
+
     # 净值计算参数
     net_value_interval: 1    # 净值更新间隔（秒）
     init_net_value: 1.0      # 初始净值
@@ -349,6 +409,14 @@ strategies:
     anti_pin_usdt: 300
     anti_pin_rate: 0.2
     bid_ask_spread: 0.05    # STG5S 特有：保持5%价差（做空风险更高）
+
+    # ========== 订单簿算法配置 ==========
+    orderbook_algorithm: "natural"
+    orderbook_config:
+      total_budget: 10000.0
+      layer: 500
+      extra_params:
+        naturalness: "high"
 
     # 净值计算参数
     net_value_interval: 1    # 净值更新间隔（秒）

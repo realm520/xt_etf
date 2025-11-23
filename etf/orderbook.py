@@ -108,7 +108,19 @@ class Orderbook:
         return np.random.uniform(min, max, size)
 
     def powera(self, init_price, price_percent):
-        f = lambda alpha, beta, x: int(alpha) * (np.e) ** (beta * x)
+        """
+        生成指数递增的订单数量序列（优化版：更贴近真实盘口）
+        
+        公式: amount[i] = init_price * e^(price_percent * i)
+        
+        Args:
+            init_price: 起始数量（最小订单量）
+            price_percent: 指数增长率（推荐 0.10-0.20）
+        
+        Returns:
+            指数递增的数量序列
+        """
+        f = lambda alpha, beta, x: float(alpha) * (np.e) ** (beta * x)  # ✅ 改为float，支持小数
         return [f(init_price, price_percent, i + 1) for i in range(0, self.layer)]
         
     def make(self, direction, make_price, make_amount, *args, **kwargs):
@@ -136,8 +148,11 @@ class Orderbook:
         elif make_amount_name == "uniform":
             amount = make_amount(kwargs["min"], kwargs["max"], self.layer)
         elif make_amount_name == "powera":
-            init_price = self.normal(kwargs["mean"], kwargs["scale"], 1)
-            amount = make_amount(init_price, kwargs["price_percent"])
+            # ✅ 使用固定起始值（不再随机），确保盘口稳定
+            init_amount = kwargs["mean"]  # 直接使用均值作为起始点
+            # ✅ 使用独立的增长率参数（避免与价格增长率混淆）
+            amount_growth_rate = kwargs.get("price_percent_amount", kwargs["price_percent"])
+            amount = make_amount(init_amount, amount_growth_rate)
 
 
         # bid 处理价格小于0
@@ -166,50 +181,4 @@ class Orderbook:
                      "order_id": []})
         return batch_order
 
-def get_orderbook(mid_price=99999.99, bid_ask_spread=None, min_order_value=1.2):
-    """
-    生成符合交易所最小订单金额要求的订单簿
-    
-    Args:
-        mid_price: 中间价（净值）
-        bid_ask_spread: 买卖价差比例
-        min_order_value: 最小订单金额（USDT），默认1.2
-    """
-    kwargs = {
-        "price_tick": 100,
-        "price_step": 10,
-        "price_percent": 1e-2,
-        "mean": 50,  # 订单金额均值（将基于min_order_value调整）
-        "scale": 1,
-        "sparse": 1e-3,
-        #"prec_price": 4, #
-        "prec_price": 6,
-        "prec_amount": 2,
-        "bid_ask_spread": 0.01,
-        "layer": 30
-    }
-    
-    # ✅ 动态调整订单金额参数，确保符合最小订单金额
-    # 根据mid_price和min_order_value计算合理的均值
-    # 目标：生成的订单金额在 [min_order_value, min_order_value * 3] 之间
-    min_amount_coin = min_order_value / mid_price  # 最小币数量
-    kwargs["mean"] = min_amount_coin * 1.5  # 均值设为最小值的1.5倍
-    kwargs["scale"] = min_amount_coin * 0.3  # 标准差设为均值的20%
-    # mid_price = 99999.99 # netvalue replace
-    if bid_ask_spread is not None:
-        kwargs["bid_ask_spread"] = bid_ask_spread
 
-    bid_0 = mid_price - ( (mid_price * kwargs["bid_ask_spread"])/2 )
-    ask_0 = mid_price + ( (mid_price * kwargs["bid_ask_spread"])/2 )
-
-    orderbook = Orderbook(bid_0=bid_0, ask_0=ask_0, layer=kwargs["layer"], prec_price=kwargs["prec_price"])
-
-    make_price_fn_bid = orderbook.power2
-    make_price_fn_ask = orderbook.power2
-
-    make_amount_fn = orderbook.powera
-
-    batch_order_bid = orderbook.make('bid', make_price_fn_bid, make_amount_fn, None, **kwargs) 
-    batch_order_ask = orderbook.make('ask', make_price_fn_ask, make_amount_fn, None, **kwargs)  
-
-    return batch_order_bid, batch_order_ask
