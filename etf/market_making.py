@@ -130,16 +130,6 @@ class MarketMaker:
         except Exception as e:
             logging.error(f"查询或取消旧反针对订单时出错: {e}")
 
-    # ❌ make_orders() 方法已于 2025-11-21 移除
-    #
-    # 移除原因：
-    # 1. 该方法用于在QA环境生成假订单，增加了代码复杂度
-    # 2. 与真实做市逻辑混淆，容易引起误解
-    # 3. pre_make_orders 配置一直为 false，从未在生产中使用
-    # 4. 测试需求可以通过单元测试或真实订单满足
-    #
-    # 如需恢复此功能，请查看 git 历史记录
-
 
     def place_orders(
         self,

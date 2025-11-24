@@ -52,53 +52,31 @@ class EtfStrategy:
         else:
             logging.info("使用传入的 depth 数据，避免重复 API 调用")
 
-        if config["cancel_all_open_orders"]:
-            logging.info("cancel_all_open_orders")
-            # STG5S 特有的行为：先取消一次
-            if (
-                config.get("strategy_name") == "stg5s"
-                or config.get("prefix") == "stg5s"
-            ):
-                order_manager.cancel_all_open_orders(config["symbol"])
-            
-            # 检查depth是否可用（防止None或空订单簿）
-            if depth and (len(depth.get("asks", [])) != 0 or len(depth.get("bids", [])) != 0):
-                try:
-                    order_manager.cancel_all_open_orders(config["symbol"])
-                    time.sleep(10)
-                except Exception as e:
-                    pass
-                columns = [
-                    "price",
-                    "quantity",
-                    "orderId",
-                    "time",
-                    "UTC_PLUS_8",
-                    "symbol",
-                    "side",
-                    "state",
-                ]
-                df = pd.DataFrame(columns=columns)
-                df.to_csv(
-                    market_maker.order_manager.open_orders_csv_file,
-                    mode="w",
-                    index=False,
-                    header=True,
-                )
+        logging.info("cancel_all_open_orders")        
+        try:
+            order_manager.cancel_all_open_orders(config["symbol"])
+            time.sleep(10)
+        except Exception as e:
+            pass
+        columns = [
+            "price",
+            "quantity",
+            "orderId",
+            "time",
+            "UTC_PLUS_8",
+            "symbol",
+            "side",
+            "state",
+        ]
+        df = pd.DataFrame(columns=columns)
+        df.to_csv(
+            market_maker.order_manager.open_orders_csv_file,
+            mode="w",
+            index=False,
+            header=True,
+        )
+        logging.info("finish cancel_all_open_orders")
 
-                # STG5S 特有的日志
-                if (
-                    config.get("strategy_name") == "stg5s"
-                    or config.get("prefix") == "stg5s"
-                ):
-                    logging.info("finish cancel_all_open_orders")
-        else:
-            logging.info("skip cancel_all_open_orders")
-
-        # ❌ pre_make_orders 功能已移除 (2025-11-21)
-        # 原因: make_orders() 方法已废弃，该配置项不再使用
-
-        # try:
 
         while True:
             try:
@@ -524,13 +502,6 @@ if __name__ == "__main__":
         "Enable_wash_trading": args.enable_wash_trading
         if args.enable_wash_trading != parser.get_default("enable_wash_trading")
         else strategy_config.get("Enable_wash_trading", args.enable_wash_trading),
-        "cancel_all_open_orders": args.cancel_all_open_orders
-        if args.cancel_all_open_orders != parser.get_default("cancel_all_open_orders")
-        else strategy_config.get("cancel_all_open_orders", args.cancel_all_open_orders),
-        # ❌ pre_make_orders 已废弃 (2025-11-21)
-        # "pre_make_orders": args.pre_make_orders
-        # if args.pre_make_orders != parser.get_default("pre_make_orders")
-        # else strategy_config.get("pre_make_orders", args.pre_make_orders),
         "leverage": args.leverage
         if args.leverage != parser.get_default("leverage")
         else strategy_config.get("leverage", args.leverage),
@@ -543,12 +514,6 @@ if __name__ == "__main__":
         "Enable_hedging": args.enable_hedging
         if args.enable_hedging != parser.get_default("enable_hedging")
         else strategy_config.get("Enable_hedging", args.enable_hedging),
-        "Exit_with_cancel_all_open_orders": args.exit_with_cancel_all_open_orders
-        if args.exit_with_cancel_all_open_orders
-        != parser.get_default("exit_with_cancel_all_open_orders")
-        else strategy_config.get(
-            "Exit_with_cancel_all_open_orders", args.exit_with_cancel_all_open_orders
-        ),
         "wash": args.wash
         if args.wash != parser.get_default("wash")
         else strategy_config.get("wash", args.wash),
@@ -870,12 +835,11 @@ if __name__ == "__main__":
             log_shutdown(strategy_name, config)
 
             # 撤销所有挂单
-            if config.get("Exit_with_cancel_all_open_orders", True):
-                try:
-                    order_manager.cancel_all_open_orders(config["symbol"])
-                    logging.info("已撤销所有挂单")
-                except Exception as e:
-                    logging.error(f"撤销挂单失败: {e}")
+            try:
+                order_manager.cancel_all_open_orders(config["symbol"])
+                logging.info("已撤销所有挂单")
+            except Exception as e:
+                logging.error(f"撤销挂单失败: {e}")
 
         except Exception as e:
             logging.error(f"清理过程出错: {e}")
