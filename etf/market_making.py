@@ -58,14 +58,15 @@ class MarketMaker:
             port=DEFAULT_REDIS_PORT,
             db=DEFAULT_REDIS_DB
         )
-        # 记录当前周期新增的反针对订单ID，用于避免误删
-        self.current_anti_pin_order_ids: List[str] = []
         
         # 价格变化追踪（避免频繁更新订单）
         self.last_netvalue: Optional[float] = None  # 上次净值
         self.last_best_sell: float = 0.0  # 上次最优卖价
         self.last_best_buy: float = 0.0  # 上次最优买价
         self.price_change_threshold: float = 0.0005  # 价格变化阈值（0.05%）
+        
+        # ✅ 订单执行器（每个交易对创建一个独立实例）
+        self.executor: Optional[OrderExecutor] = None  # 价格变化阈值（0.05%）
 
     def _cancel_old_anti_pin_orders(
         self,
@@ -151,13 +152,12 @@ class MarketMaker:
         prec: int = 4,
     ) -> None:
         """
-        执行智能做市订单放置策略（优化版：先挂新单再撤旧单）
+        执行智能做市订单放置策略（重构版：使用OrderExecutor统一执行）
         
-        优化要点：
-        1. 检测价格变化，避免频繁更新
-        2. 先添加新订单，确保盘口连续性
-        3. 再取消旧订单，避免BBO spread扩大
-        4. 反针对订单先加后删，保持保护
+        架构改进：
+        1. 算法层：OrderbookFactory生成目标订单簿
+        2. 执行层：OrderExecutor统一处理订单匹配和执行
+        3. 保持原有功能：价格变化检测、反针对订单、先加后删等
         
         Args:
             config: 策略配置字典，包含净值键、价差、精度等参数
@@ -269,13 +269,30 @@ class MarketMaker:
         algorithm = OrderbookFactory.create(orderbook_algorithm, orderbook_cfg)
         snapshot = algorithm.generate_snapshot()
 
-        # 转换为兼容格式
+        # 转换为兼容格式（包含optimize_order_matching所需的所有字段）
+        # 计算价格容差（用于min_price和max_price）
+        price_tolerance = 10 ** (-orderbook_cfg.price_precision)
+
         batch_order_bid = [
-            {"price": float(level.price), "quantity": float(level.quantity)}
+            {
+                "price": float(level.price),
+                "quantity": float(level.quantity),
+                "amount": float(level.quantity),  # optimize_order_matching需要
+                "direction": "bid",               # optimize_order_matching需要
+                "min_price": float(level.price) - price_tolerance,  # 价格范围下界
+                "max_price": float(level.price) + price_tolerance,  # 价格范围上界
+            }
             for level in snapshot.bids
         ]
         batch_order_ask = [
-            {"price": float(level.price), "quantity": float(level.quantity)}
+            {
+                "price": float(level.price),
+                "quantity": float(level.quantity),
+                "amount": float(level.quantity),  # optimize_order_matching需要
+                "direction": "ask",               # optimize_order_matching需要
+                "min_price": float(level.price) - price_tolerance,  # 价格范围下界
+                "max_price": float(level.price) + price_tolerance,  # 价格范围上界
+            }
             for level in snapshot.asks
         ]
 
@@ -296,140 +313,39 @@ class MarketMaker:
             f"目标盘口 - 卖N: {batch_order_ask[-1]}, 买N: {batch_order_bid[-1]}"
         )
 
-        # === 5. 订单匹配分析 ===
-        @performance_monitor.time_function("order_matching")
-        def perform_order_matching():
-            # 为goal_orders添加symbol信息
-            for goal in goal_orders:
-                goal["symbol"] = symbol
+        # === 5. 初始化或获取订单执行器 ===
+        if self.executor is None:
+            # 首次运行，创建执行器
+            self.executor = OrderExecutor(
+                order_manager=self.order_manager,
+                symbol=symbol,
+                strategy_name=config.get("strategy_name", "unknown"),
+                max_layer=orderbook_cfg.layer,  # 传递最大档位数（用于订单数量保护）
+            )
+            logging.info(f"✅ 创建订单执行器: {symbol}, 最大档位: {orderbook_cfg.layer}")
 
-            return optimize_order_matching(current_orders, goal_orders)
-
-        optimized_add_orders, optimized_cancel_orders = perform_order_matching()
-
-        # 为每个新订单设置clientOrderId
-        for order_data in optimized_add_orders:
-            order_data["clientOrderId"] = self.order_manager.create_temp_id()
-
-        # === 6. 识别需要取消的超范围订单 ===
-        for market_order in current_orders:
-            if (
-                float(market_order["price"]) < batch_order_ask[0]["price"]
-                and market_order["side"] == "SELL"
-            ) or (
-                float(market_order["price"]) > batch_order_bid[0]["price"]
-                and market_order["side"] == "BUY"
-            ):
-                logging.debug(f"超范围订单需取消: {market_order['price']}")
-                optimized_cancel_orders.append(market_order)
-
-        logging.info(f"订单操作计划 - 新增: {len(optimized_add_orders)}, 取消: {len(optimized_cancel_orders)}")
-
-        # === 7. 准备反针对订单 ===
-        anti_pin_price_sell = round(
-            self.best_sell * (1 + config["anti_pin_rate"]), config["precision"]
-        )
-        anti_pin_price_buy = round(
-            self.best_buy * (1 - config["anti_pin_rate"]), config["precision"]
-        )
-
-        anti_pin_amount_sell = round(
-            (config["anti_pin_usdt"] / 2) / anti_pin_price_sell,
-            config["prec_amount"],
-        )
-        anti_pin_amount_buy = round(
-            (config["anti_pin_usdt"] / 2) / anti_pin_price_buy,
-            config["prec_amount"],
-        )
-
-        # 清空上一周期的反针对订单ID记录
-        self.current_anti_pin_order_ids = []
-
-        # 创建反针对卖单
-        sell_client_order_id = self.order_manager.create_temp_id()
-        sell_order_data = {
-            "symbol": symbol,
-            "clientOrderId": sell_client_order_id,
-            "side": SIDE_SELL,
-            "type": ORDER_TYPE_LIMIT,
-            "timeInForce": TIME_IN_FORCE_GTC,
-            "bizType": BIZ_TYPE_SPOT,
-            "price": anti_pin_price_sell,
-            "quantity": anti_pin_amount_sell,
-            "quoteQty": None,
+        # === 6. 准备反针对订单配置 ===
+        anti_pin_config = {
+            "anti_pin_rate": config["anti_pin_rate"],
+            "anti_pin_usdt": config["anti_pin_usdt"],
+            "precision": config["precision"],
+            "prec_amount": config["prec_amount"],
         }
-        optimized_add_orders.append(sell_order_data)
-        self.current_anti_pin_order_ids.append(sell_client_order_id)
 
-        # 创建反针对买单
-        buy_client_order_id = self.order_manager.create_temp_id()
-        buy_order_data = {
-            "symbol": symbol,
-            "clientOrderId": buy_client_order_id,
-            "side": SIDE_BUY,
-            "type": ORDER_TYPE_LIMIT,
-            "timeInForce": TIME_IN_FORCE_GTC,
-            "bizType": BIZ_TYPE_SPOT,
-            "price": anti_pin_price_buy,
-            "quantity": anti_pin_amount_buy,
-            "quoteQty": None,
-        }
-        optimized_add_orders.append(buy_order_data)
-        self.current_anti_pin_order_ids.append(buy_client_order_id)
-
-        logging.info(
-            f"反针对订单 - 卖价: {anti_pin_price_sell} (量: {anti_pin_amount_sell}), "
-            f"买价: {anti_pin_price_buy} (量: {anti_pin_amount_buy})"
+        # === 7. 使用OrderExecutor执行订单簿更新 ===
+        summary = self.executor.execute_orderbook_update(
+            current_orders=current_orders,
+            target_orders=goal_orders,
+            best_sell=self.best_sell,
+            best_buy=self.best_buy,
+            anti_pin_config=anti_pin_config,
         )
 
-        # === 8. 执行订单操作（关键优化：先加后删）===
-        max_batch_size = DEFAULT_BATCH_SIZE
-
-        @performance_monitor.time_function("batch_order_processing")
-        def execute_order_batches():
-            # ✅ 步骤1: 先批量添加所有新订单（包括反针对订单）
-            if optimized_add_orders:
-                chunked_add_orders = optimize_batch_operations(
-                    optimized_add_orders, max_batch_size, "add"
-                )
-                for batch in chunked_add_orders:
-                    try:
-                        res = self.order_manager.add_orders_batch(
-                            batch, batch_id=DEFAULT_BATCH_ID
-                        )
-                        logging.info(f"✅ 成功添加 {len(batch)} 个新订单")
-                    except Exception as e:
-                        logging.error(f"❌ 批量添加订单失败: {e}")
-
-            # ✅ 步骤2: 等待新订单上盘（给交易所时间处理）
-            if optimized_add_orders:
-                time.sleep(0.1)  # 100ms缓冲，确保新订单已生效
-
-            # ✅ 步骤3: 再批量取消旧订单
-            if optimized_cancel_orders:
-                chunked_cancel_orders = optimize_batch_operations(
-                    optimized_cancel_orders, max_batch_size, "cancel"
-                )
-                for batch in chunked_cancel_orders:
-                    try:
-                        res = self.order_manager.cancel_orders_batch(orders=batch)
-                        logging.info(f"✅ 成功取消 {len(batch)} 个旧订单")
-                    except Exception as e:
-                        logging.error(f"❌ 批量取消订单失败: {e}")
-
-        execute_order_batches()
-
-        # === 9. 清理旧的反针对订单 ===
-        self._cancel_old_anti_pin_orders(
-            symbol=symbol,
-            anti_pin_price_sell=anti_pin_price_sell,
-            anti_pin_price_buy=anti_pin_price_buy,
-            exclude_order_ids=self.current_anti_pin_order_ids,
-        )
-
-        # === 10. 更新价格记录 ===
+        # === 8. 更新价格记录 ===
         self.last_best_sell = self.best_sell
         self.last_best_buy = self.best_buy
+
+        logging.info(f"📊 {summary.summary_text()}")
     
     def get_performance_stats(self) -> Dict[str, Any]:
         """
