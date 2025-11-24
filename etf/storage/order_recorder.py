@@ -126,14 +126,18 @@ class OrderRecorder:
         self.order_queue = Queue(maxsize=10000)
         self.trade_queue = Queue(maxsize=10000)
 
-        # 统计信息
+        # 统计信息（按订单用途分类）
         self.stats = {
             "total_orders": 0,
             "total_trades": 0,
-            "real_orders": 0,
-            "wash_orders": 0,
-            "real_volume": 0.0,
-            "wash_volume": 0.0,
+            "market_making_orders": 0,
+            "anti_pin_orders": 0,
+            "wash_trading_orders": 0,
+            "hedging_orders": 0,
+            "market_making_volume": 0.0,
+            "anti_pin_volume": 0.0,
+            "wash_trading_volume": 0.0,
+            "hedging_volume": 0.0,
             "db_write_success": 0,
             "db_write_failed": 0,
             "csv_fallback_count": 0,
@@ -214,10 +218,12 @@ class OrderRecorder:
 
             # 更新统计
             self.stats["total_orders"] += 1
-            if order_data.get("is_wash_trading", False):
-                self.stats["wash_orders"] += 1
-            else:
-                self.stats["real_orders"] += 1
+            
+            # 根据订单用途更新统计
+            order_purpose = order_data.get("order_purpose", "market_making")
+            purpose_key = f"{order_purpose}_orders"
+            if purpose_key in self.stats:
+                self.stats[purpose_key] += 1
 
             # 放入队列等待批量写入
             self.order_queue.put_nowait(order_data)
@@ -245,10 +251,11 @@ class OrderRecorder:
                 trade_data.get("price", 0)
             )
 
-            if trade_data.get("is_wash_trading", False):
-                self.stats["wash_volume"] += volume
-            else:
-                self.stats["real_volume"] += volume
+            # 根据交易用途更新统计
+            trade_purpose = trade_data.get("trade_purpose", "market_making")
+            volume_key = f"{trade_purpose}_volume"
+            if volume_key in self.stats:
+                self.stats[volume_key] += volume
 
             # 放入队列等待批量写入
             self.trade_queue.put_nowait(trade_data)
@@ -281,10 +288,10 @@ class OrderRecorder:
             # 更新统计信息
             stats_key = f"stats:{order_data['symbol']}:orders"
             await self.redis.hincrby(stats_key, "total", 1)
-            if order_data.get("is_wash_trading", False):
-                await self.redis.hincrby(stats_key, "wash", 1)
-            else:
-                await self.redis.hincrby(stats_key, "real", 1)
+            
+            # 根据订单用途更新Redis统计
+            order_purpose = order_data.get("order_purpose", "market_making")
+            await self.redis.hincrby(stats_key, order_purpose, 1)
 
         except Exception as e:
             logging.error(f"更新Redis缓存失败: {e}")
@@ -313,45 +320,48 @@ class OrderRecorder:
             stats_key = f"stats:{trade_data['symbol']}:trades"
 
             await self.redis.hincrbyfloat(stats_key, "total_volume", volume)
-            if trade_data.get("is_wash_trading", False):
-                await self.redis.hincrbyfloat(stats_key, "wash_volume", volume)
-            else:
-                await self.redis.hincrbyfloat(stats_key, "real_volume", volume)
+            
+            # 根据交易用途更新Redis成交量统计
+            trade_purpose = trade_data.get("trade_purpose", "market_making")
+            volume_key = f"{trade_purpose}_volume"
+            await self.redis.hincrbyfloat(stats_key, volume_key, volume)
 
         except Exception as e:
             logging.error(f"更新成交缓存失败: {e}")
 
-    async def get_real_volume_ratio(
-        self, symbol: str, period_minutes: int = 60
-    ) -> float:
+    async def get_trade_volume_stats(self, symbol: str) -> Dict[str, Any]:
         """
-        获取真实交易量占比
+        获取成交量统计信息（按交易用途分类）
         Args:
             symbol: 交易对
-            period_minutes: 统计周期（分钟）
         Returns:
-            真实交易量占总交易量的比例
+            按交易用途分类的成交量统计
         """
         if not self.redis:
-            return 0.0
+            return {}
 
         try:
             stats_key = f"stats:{symbol}:trades"
             stats = await self.redis.hgetall(stats_key)
 
             total_volume = float(stats.get("total_volume", 0))
-            real_volume = float(stats.get("real_volume", 0))
-
-            if total_volume > 0:
-                return real_volume / total_volume
-            return 0.0
+            
+            return {
+                "total_volume": total_volume,
+                "market_making_volume": float(stats.get("market_making_volume", 0)),
+                "anti_pin_volume": float(stats.get("anti_pin_volume", 0)),
+                "wash_trading_volume": float(stats.get("wash_trading_volume", 0)),
+                "hedging_volume": float(stats.get("hedging_volume", 0)),
+                "market_making_ratio": float(stats.get("market_making_volume", 0)) / max(0.01, total_volume),
+                "wash_trading_ratio": float(stats.get("wash_trading_volume", 0)) / max(0.01, total_volume),
+            }
 
         except Exception as e:
-            logging.error(f"获取真实交易量占比失败: {e}")
-            return 0.0
+            logging.error(f"获取成交量统计失败: {e}")
+            return {}
 
     async def get_order_stats(self, symbol: str) -> Dict[str, Any]:
-        """获取订单统计信息"""
+        """获取订单统计信息（按订单用途分类）"""
         if not self.redis:
             return {}
 
@@ -359,12 +369,16 @@ class OrderRecorder:
             stats_key = f"stats:{symbol}:orders"
             stats = await self.redis.hgetall(stats_key)
 
+            total = int(stats.get("total", 0))
+            
             return {
-                "total_orders": int(stats.get("total", 0)),
-                "real_orders": int(stats.get("real", 0)),
-                "wash_orders": int(stats.get("wash", 0)),
-                "real_order_ratio": float(stats.get("real", 0))
-                / max(1, int(stats.get("total", 1))),
+                "total_orders": total,
+                "market_making_orders": int(stats.get("market_making", 0)),
+                "anti_pin_orders": int(stats.get("anti_pin", 0)),
+                "wash_trading_orders": int(stats.get("wash_trading", 0)),
+                "hedging_orders": int(stats.get("hedging", 0)),
+                "market_making_ratio": int(stats.get("market_making", 0)) / max(1, total),
+                "wash_trading_ratio": int(stats.get("wash_trading", 0)) / max(1, total),
             }
 
         except Exception as e:
@@ -451,7 +465,7 @@ class OrderRecorder:
                             "status": order.get("status", "NEW"),
                             "filled_quantity": float(order.get("filled_quantity", 0)),
                             "strategy_name": order.get("strategy_name"),
-                            "is_wash_trading": order.get("is_wash_trading", False),
+                            "order_purpose": order.get("order_purpose", "market_making"),
                             "net_value": float(order.get("net_value")) if order.get("net_value") else None,
                             "bid_ask_spread": float(order.get("bid_ask_spread")) if order.get("bid_ask_spread") else None,
                             "best_bid": float(order.get("best_bid")) if order.get("best_bid") else None,
@@ -505,7 +519,7 @@ class OrderRecorder:
                         "quantity": float(order.get("quantity", 0)),
                         "status": order.get("status", "NEW"),
                         "strategy_name": order.get("strategy_name"),
-                        "is_wash_trading": order.get("is_wash_trading", False),
+                        "order_purpose": order.get("order_purpose", "market_making"),
                         "created_at": created_at,
                     }
                     await session.execute(insert(OrderModel).values(record))
@@ -582,7 +596,7 @@ class OrderRecorder:
                             "is_maker": trade.get("is_maker", False),
                             "is_buyer": trade.get("is_buyer"),
                             "strategy_name": trade.get("strategy_name"),
-                            "is_wash_trading": trade.get("is_wash_trading", False),
+                            "trade_purpose": trade.get("trade_purpose", "market_making"),
                             "traded_at": traded_at,
                         }
                         trade_records.append(record)
@@ -628,7 +642,7 @@ class OrderRecorder:
                         "quantity": float(trade.get("quantity", 0)),
                         "fee": float(trade.get("fee", 0)),
                         "strategy_name": trade.get("strategy_name"),
-                        "is_wash_trading": trade.get("is_wash_trading", False),
+                        "trade_purpose": trade.get("trade_purpose", "market_making"),
                         "traded_at": traded_at,
                     }
                     await session.execute(insert(TradeModel).values(record))
@@ -670,6 +684,294 @@ class OrderRecorder:
             "trades": self.trade_queue.qsize(),
         }
         return stats
+
+    async def sync_order_status_from_exchange(
+        self,
+        exchange_orders: List[Dict[str, Any]],
+        symbol: str,
+        strategy_name: str
+    ) -> Dict[str, int]:
+        """
+        从交易所同步订单状态到数据库
+        
+        用途：
+        1. 启动时同步 - 确保数据库状态与交易所一致
+        2. 定期轮询 - 补充WebSocket可能遗漏的更新
+        
+        Args:
+            exchange_orders: 交易所返回的订单列表
+            symbol: 交易对
+            strategy_name: 策略名称
+            
+        Returns:
+            统计信息 {
+                "synced": 同步成功数量,
+                "created": 新创建数量,
+                "updated": 更新状态数量,
+                "skipped": 跳过数量
+            }
+        """
+        from .order_states import OrderStatusManager
+        
+        stats = {"synced": 0, "created": 0, "updated": 0, "skipped": 0}
+        
+        if not self._db_available or not self.async_session:
+            logging.warning("数据库不可用，无法同步订单状态")
+            return stats
+            
+        try:
+            async with self.async_session() as session:
+                for order in exchange_orders:
+                    order_id = order.get("orderId")
+                    exchange_status = order.get("state")  # XT交易所使用state字段
+                    
+                    # 查询数据库中的订单
+                    result = await session.execute(
+                        select(OrderModel).where(OrderModel.order_id == order_id)
+                    )
+                    db_order = result.scalar_one_or_none()
+                    
+                    if db_order is None:
+                        # 数据库中不存在，创建新记录（可能是启动前创建的）
+                        created_at = to_naive_utc(order.get("time") / 1000 if order.get("time") else None)
+                        
+                        new_order = OrderModel(
+                            symbol=symbol,
+                            order_id=order_id,
+                            client_order_id=order.get("clientOrderId"),
+                            side=order.get("side"),
+                            order_type=order.get("type", "LIMIT"),
+                            price=float(order.get("price", 0)),
+                            quantity=float(order.get("origQty", 0)),
+                            status=exchange_status,
+                            filled_quantity=float(order.get("executedQty", 0)),
+                            strategy_name=strategy_name,
+                            order_purpose="market_making",  # 默认值
+                            created_at=created_at,
+                        )
+                        session.add(new_order)
+                        stats["created"] += 1
+                        
+                    else:
+                        # 数据库中存在，检查是否需要更新
+                        current_status = db_order.status
+                        
+                        # 检查状态转换是否合法
+                        is_valid, error_msg = OrderStatusManager.validate_transition(
+                            current_status, exchange_status
+                        )
+                        
+                        if current_status == exchange_status:
+                            stats["skipped"] += 1
+                            continue
+                            
+                        if not is_valid:
+                            # 状态转换不合法，但交易所已经变更了
+                            # 这种情况可能是：
+                            # 1. 数据库状态是PENDING，交易所已经是NEW（正常）
+                            # 2. 数据库状态是PENDING_CANCEL，交易所已经是CANCELED（正常）
+                            # 3. WebSocket遗漏了中间状态
+                            
+                            if current_status in ("PENDING", "PENDING_CANCEL"):
+                                # PENDING状态允许强制同步
+                                logging.info(
+                                    f"订单 {order_id} 从 {current_status} 强制同步到 {exchange_status}"
+                                )
+                            else:
+                                logging.warning(
+                                    f"订单 {order_id} 状态转换异常: {current_status} -> {exchange_status}, "
+                                    f"原因: {error_msg}，强制同步"
+                                )
+                        
+                        # 更新订单状态
+                        await session.execute(
+                            update(OrderModel)
+                            .where(OrderModel.order_id == order_id)
+                            .values(
+                                status=exchange_status,
+                                filled_quantity=float(order.get("executedQty", 0)),
+                                updated_at=datetime.now(timezone.utc).replace(tzinfo=None)
+                            )
+                        )
+                        stats["updated"] += 1
+                
+                await session.commit()
+                stats["synced"] = stats["created"] + stats["updated"]
+                
+                if stats["synced"] > 0:
+                    logging.info(
+                        f"✅ 订单状态同步完成: symbol={symbol}, "
+                        f"新建={stats['created']}, 更新={stats['updated']}, 跳过={stats['skipped']}"
+                    )
+                    
+        except Exception as e:
+            logging.error(f"❌ 订单状态同步失败: {e}", exc_info=True)
+            
+        return stats
+
+    async def record_order_cancellation(
+        self,
+        order_ids: List[str],
+        symbol: str,
+        cancellation_reason: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ):
+        """
+        记录订单撤销操作（第一阶段：PENDING_CANCEL）
+        
+        Args:
+            order_ids: 被撤销的订单ID列表
+            symbol: 交易对
+            cancellation_reason: 撤销原因
+                - "stop_loss_fixed": 固定止损触发
+                - "stop_loss_trailing": 移动止损触发
+                - "stop_loss_time": 时间止损触发
+                - "risk_level_1": 风险等级1（极高风险）
+                - "risk_level_2": 风险等级2（中等风险）
+                - "manual": 手动撤销
+                - "strategy_adjustment": 策略调整
+            metadata: 额外元数据（止损参数、风险评分等）
+        """
+        from .order_states import OrderStatusManager
+        
+        if not self._db_available or not self.async_session:
+            logging.warning("数据库不可用，无法记录撤单操作")
+            return
+            
+        try:
+            async with self.async_session() as session:
+                for order_id in order_ids:
+                    # 查询当前订单状态
+                    result = await session.execute(
+                        select(OrderModel).where(OrderModel.order_id == order_id)
+                    )
+                    order = result.scalar_one_or_none()
+                    
+                    if order is None:
+                        logging.warning(f"订单 {order_id} 不存在，无法记录撤单")
+                        continue
+                    
+                    # 检查是否可以撤单
+                    if not OrderStatusManager.can_cancel(order.status):
+                        logging.warning(
+                            f"订单 {order_id} 当前状态 {order.status} 不可撤单，跳过"
+                        )
+                        continue
+                    
+                    # 更新为PENDING_CANCEL状态
+                    extra_info = order.extra_info or {}
+                    extra_info.update({
+                        "cancellation_reason": cancellation_reason,
+                        "cancellation_metadata": metadata,
+                        "cancel_requested_at": datetime.now(timezone.utc).isoformat()
+                    })
+                    
+                    await session.execute(
+                        update(OrderModel)
+                        .where(OrderModel.order_id == order_id)
+                        .values(
+                            status="PENDING_CANCEL",
+                            extra_info=extra_info,
+                            updated_at=datetime.now(timezone.utc).replace(tzinfo=None)
+                        )
+                    )
+                
+                await session.commit()
+                logging.info(
+                    f"✅ 记录撤单操作: {len(order_ids)} 个订单 → PENDING_CANCEL, "
+                    f"原因: {cancellation_reason}"
+                )
+                
+        except Exception as e:
+            logging.error(f"❌ 记录撤单操作失败: {e}", exc_info=True)
+
+    async def confirm_order_cancellation(
+        self,
+        order_ids: List[str],
+        success: bool = True
+    ):
+        """
+        确认订单撤销结果（第二阶段：PENDING_CANCEL → CANCELED/CANCEL_REJECTED）
+        
+        Args:
+            order_ids: 订单ID列表
+            success: 撤单是否成功
+        """
+        if not self._db_available or not self.async_session:
+            return
+            
+        try:
+            final_status = "CANCELED" if success else "CANCEL_REJECTED"
+            
+            async with self.async_session() as session:
+                await session.execute(
+                    update(OrderModel)
+                    .where(OrderModel.order_id.in_(order_ids))
+                    .where(OrderModel.status == "PENDING_CANCEL")
+                    .values(
+                        status=final_status,
+                        updated_at=datetime.now(timezone.utc).replace(tzinfo=None)
+                    )
+                )
+                await session.commit()
+                
+                logging.info(
+                    f"✅ 撤单结果确认: {len(order_ids)} 个订单 → {final_status}"
+                )
+                
+        except Exception as e:
+            logging.error(f"❌ 确认撤单结果失败: {e}", exc_info=True)
+
+    async def get_active_orders_from_db(
+        self,
+        symbol: str,
+        strategy_name: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        从数据库查询活跃订单
+        
+        活跃订单包括：NEW, PARTIALLY_FILLED, PENDING_CANCEL
+        
+        Args:
+            symbol: 交易对
+            strategy_name: 策略名称（可选）
+            
+        Returns:
+            订单列表
+        """
+        if not self._db_available or not self.async_session:
+            return []
+            
+        try:
+            async with self.async_session() as session:
+                query = select(OrderModel).where(
+                    OrderModel.symbol == symbol,
+                    OrderModel.status.in_(["NEW", "PARTIALLY_FILLED", "PENDING_CANCEL"])
+                )
+                
+                if strategy_name:
+                    query = query.where(OrderModel.strategy_name == strategy_name)
+                
+                result = await session.execute(query)
+                orders = result.scalars().all()
+                
+                return [
+                    {
+                        "order_id": order.order_id,
+                        "client_order_id": order.client_order_id,
+                        "side": order.side,
+                        "price": float(order.price),
+                        "quantity": float(order.quantity),
+                        "status": order.status,
+                        "filled_quantity": float(order.filled_quantity or 0),
+                        "created_at": order.created_at,
+                    }
+                    for order in orders
+                ]
+                
+        except Exception as e:
+            logging.error(f"❌ 查询活跃订单失败: {e}")
+            return []
 
 
 # 全局单例

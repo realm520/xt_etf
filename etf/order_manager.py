@@ -19,6 +19,14 @@ from etf.utils.order_errors import (
     get_blacklist_ttl,
 )
 
+# 导入WebSocket订单监听器
+try:
+    from etf.websocket.order_websocket import OrderWebSocketClient
+    ORDER_WEBSOCKET_AVAILABLE = True
+except ImportError:
+    ORDER_WEBSOCKET_AVAILABLE = False
+    logging.warning("订单WebSocket监听器未安装")
+
 # 导入订单记录器
 try:
     from etf.storage import get_order_recorder
@@ -29,6 +37,9 @@ except ImportError:
 
 # 导入资金检查器
 from etf.balance_checker import BalanceChecker, BalanceStatus
+
+# 导入订单状态管理器
+from etf.order_state_manager import OrderStateManager
 
 
 def retry_on_failure(max_retries: int = 3, delay: float = 1.0, backoff: float = 2.0):
@@ -107,11 +118,12 @@ class Order:
 
 
 class OrderManager:
-    def __init__(self, spot, strategy_name: str = "unknown", symbol_config=None):
+    def __init__(self, spot, strategy_name: str = "unknown", symbol_config=None, enable_websocket: bool = False, tier: int = 500):
         self.counter = 0
         self.client = spot
         self.strategy_name = strategy_name  # 添加策略名称
         self.symbol_config = symbol_config  # Symbol配置管理器
+        self.tier = tier  # 订单档位数量（默认500档）
         self.last_position = 0
         self.position = 0
         self.amount = 0
@@ -183,7 +195,25 @@ class OrderManager:
         self.balance_checker = None
         self.balance_check_enabled = False
         self.last_balance_check_time = 0
-        self.balance_check_interval = 60  # 默认每60秒检查一次  # 默认每60秒检查一次
+        self.balance_check_interval = 60  # 默认每60秒检查一次
+        
+        # 初始化WebSocket订单监听器（默认关闭，通过参数启用）
+        self.order_ws_client = None
+        self.use_order_websocket = False
+        
+        # 如果启用WebSocket且可用，则初始化订单监听器
+        if enable_websocket and ORDER_WEBSOCKET_AVAILABLE:
+            self._init_order_websocket()
+
+        # ✅ 初始化订单状态管理器（统一订单状态变更入口）
+        self.state_manager = OrderStateManager(
+            open_orders=self.open_orders,
+            filled_orders=self.filled_orders,
+            canceled_orders=self.canceled_orders,
+            order_recorder=self.order_recorder,
+            logger=logging.getLogger(f"{__name__}.StateManager")
+        )
+        logging.info("OrderStateManager已初始化")
 
     def _init_recorder_loop(self):
         """初始化后台事件循环用于异步操作"""
@@ -226,6 +256,220 @@ class OrderManager:
 
         if not self._recorder_running:
             logging.warning("订单记录器后台循环启动超时")
+
+    def _init_order_websocket(self):
+        """初始化订单WebSocket监听器
+        
+        功能：
+        - 创建OrderWebSocketClient实例
+        - 注册订单更新和成交推送的回调函数
+        - 启动后台WebSocket连接
+        - 设置use_order_websocket标志
+        
+        异常处理：
+        - 捕获初始化异常并记录错误
+        - 初始化失败时降级到REST API轮询
+        """
+        try:
+            # 获取symbol（从第一个订单或配置中获取）
+            # 注意：这里假设所有订单都使用相同的symbol
+            symbol = None
+            if hasattr(self, 'symbol_config') and self.symbol_config:
+                # 从symbol_config获取symbol
+                symbols = list(self.symbol_config.symbol_configs.keys())
+                if symbols:
+                    symbol = symbols[0]
+            
+            if not symbol:
+                logging.warning("无法获取symbol，WebSocket订单监听器初始化失败")
+                return
+            
+            # 创建WebSocket订单监听器
+            self.order_ws_client = OrderWebSocketClient(
+                access_key=self.client.api_key,
+                secret_key=self.client.api_secret,
+                symbol=symbol,
+                on_order_update=self._on_order_update,
+                on_trade=self._on_trade
+            )
+            
+            # 启动WebSocket连接（在后台线程中运行）
+            self.order_ws_client.start()
+            self.use_order_websocket = True
+            
+            logging.info(f"订单WebSocket监听器已启动: {symbol}")
+            
+        except Exception as e:
+            logging.error(f"初始化订单WebSocket监听器失败: {e}", exc_info=True)
+            self.order_ws_client = None
+            self.use_order_websocket = False
+    
+    def _on_order_update(self, order_data: Dict):
+        """订单更新回调函数 - 重构版
+
+        当WebSocket接收到订单状态变化时触发。
+
+        Args:
+            order_data: 订单数据字典，包含以下字段：
+                - orderId: 订单ID
+                - state: 订单状态 (NEW, PARTIALLY_FILLED, FILLED, CANCELED, REJECTED, EXPIRED)
+                - symbol: 交易对
+                - side: 方向 (BUY/SELL)
+                - price: 价格
+                - origQty: 原始数量
+                - executedQty: 已执行数量
+                - leavingQty: 剩余数量
+                - avgPrice: 平均成交价
+                - fee: 手续费
+                - time: 创建时间
+                - updatedTime: 更新时间
+
+        ✅ 重构说明：
+        所有订单状态变更现在统一通过OrderStateManager处理，确保：
+        1. 状态转换合法性验证
+        2. 内存缓存原子性更新
+        3. 数据库异步持久化
+        4. 审计追踪完整性
+        """
+        try:
+            order_id = order_data.get('orderId')
+            state = order_data.get('state')
+
+            if not order_id or not state:
+                logging.warning(f"订单更新数据不完整: {order_data}")
+                return
+
+            logging.debug(f"订单状态更新: {order_id} -> {state}")
+
+            # ✅ 统一的订单数据格式
+            unified_order_data = {
+                "symbol": order_data.get('symbol'),
+                "side": order_data.get('side'),
+                "price": order_data.get('price'),
+                "quantity": order_data.get('origQty'),
+                "orderId": order_id,
+                "executed_qty": order_data.get('executedQty', '0'),
+                "state": state,
+                "avgPrice": order_data.get('avgPrice', '0'),
+                "fee": order_data.get('fee', '0'),
+                "time": order_data.get('time'),
+                "updatedTime": order_data.get('updatedTime')
+            }
+
+            # ✅ 调用统一状态管理器
+            success = self.state_manager.update_order_state(
+                order_id=order_id,
+                new_state=state,
+                order_data=unified_order_data,
+                trigger_source='websocket'
+            )
+
+            if success:
+                # 更新partially_filled_orders追踪（业务逻辑需要）
+                if state == 'PARTIALLY_FILLED':
+                    self.partially_filled_orders[order_id] = self.open_orders.get(order_id)
+                    logging.info(f"订单部分成交: {order_id} | 已执行 {order_data.get('executedQty')}/{order_data.get('origQty')}")
+
+                # 从partially_filled_orders中移除已终态的订单
+                elif state in ['FILLED', 'CANCELED', 'REJECTED', 'EXPIRED']:
+                    if order_id in self.partially_filled_orders:
+                        self.partially_filled_orders.pop(order_id)
+                    logging.info(f"订单状态变更: {order_id} -> {state}")
+            else:
+                logging.warning(f"订单状态更新失败（可能是非法转换）: {order_id} -> {state}")
+
+        except Exception as e:
+            logging.error(f"处理订单更新失败: {e}", exc_info=True)
+    
+    def _on_trade(self, trade_data: Dict):
+        """成交推送回调函数 - 重构版
+
+        当WebSocket接收到订单成交事件时触发。
+
+        Args:
+            trade_data: 成交数据字典，包含以下字段：
+                - tradeId: 成交ID
+                - orderId: 订单ID
+                - symbol: 交易对
+                - side: 方向 (BUY/SELL)
+                - price: 成交价格
+                - quantity: 成交数量
+                - fee: 手续费
+                - feeCurrency: 手续费币种
+                - isMaker: 是否为maker
+                - time: 成交时间
+
+        ✅ 重构说明：
+        成交事件处理现在通过OrderStateManager.handle_trade_event()统一管理，确保：
+        1. 订单累计成交量正确更新
+        2. 订单状态自动转换（PARTIALLY_FILLED → FILLED）
+        3. 成交数据完整记录到数据库
+        """
+        try:
+            order_id = trade_data.get('orderId')
+            quantity = float(trade_data.get('quantity', 0))
+            price = float(trade_data.get('price', 0))
+
+            if not order_id:
+                logging.warning(f"成交推送缺少orderId: {trade_data}")
+                return
+
+            logging.info(f"成交推送: {order_id} | {quantity}@{price}")
+
+            # 1. 记录成交到recent_fills（用于洗盘交易智能调整）
+            self.record_fill(quantity, price)
+
+            # ✅ 2. 调用统一状态管理器处理成交事件
+            #   这会自动：
+            #   - 更新订单的executed_qty
+            #   - 判断订单状态（PARTIALLY_FILLED vs FILLED）
+            #   - 触发数据库持久化
+            success = self.state_manager.handle_trade_event(
+                trade_data=trade_data,
+                trigger_source='websocket'
+            )
+
+            if not success:
+                logging.warning(f"成交事件处理失败: {order_id}")
+
+            # 3. 记录成交到数据库（如果order_recorder可用）
+            if self.order_recorder:
+                record_data = {
+                    "symbol": trade_data.get('symbol'),
+                    "trade_id": trade_data.get('tradeId'),
+                    "order_id": order_id,
+                    "price": price,
+                    "quantity": quantity,
+                    "quote_quantity": price * quantity,
+                    "is_buyer": trade_data.get('side') == 'BUY',
+                    "traded_at": datetime.now(timezone.utc),
+                    "strategy_name": self.strategy_name,
+                    "is_maker": trade_data.get('isMaker', False),
+                    "fee": float(trade_data.get('fee', 0)),
+                    "fee_currency": trade_data.get('feeCurrency', 'USDT')
+                }
+
+                # 异步记录成交
+                self.record_trade(record_data)
+
+            # 4. 更新交易历史（用于本地追踪）
+            self.trading_history.append({
+                "trade_id": trade_data.get('tradeId'),
+                "order_id": order_id,
+                "symbol": trade_data.get('symbol'),
+                "side": trade_data.get('side'),
+                "price": price,
+                "quantity": quantity,
+                "time": trade_data.get('time'),
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+
+            # 限制trading_history大小（保留最近1000条）
+            if len(self.trading_history) > 1000:
+                self.trading_history = self.trading_history[-1000:]
+
+        except Exception as e:
+            logging.error(f"处理成交推送失败: {e}", exc_info=True)
 
     def enable_balance_check(
         self,
@@ -506,20 +750,18 @@ class OrderManager:
         except Exception as e:
             logging.error(f"清除黑名单失败: {e}")
 
-    @handle_api_error
     def get_depth_data(self, symbol):
-        if not self._check_circuit_breaker():
-            return None
-            
-        try:
-            depth = self.client.get_depth(symbol)
-            logging.debug(f"depth {depth}")
-            self.depth = depth
-            self._record_api_success()
-            return depth
-        except Exception as e:
-            self._record_api_failure()
-            raise
+        """
+        获取深度数据（已废弃，保留用于兼容性）
+        
+        注意：该方法已不再使用，所有价格计算已改为使用市场价格。
+        保留仅为向后兼容，避免破坏现有代码。
+        
+        Returns:
+            None: 始终返回None
+        """
+        logging.debug(f"get_depth_data 已废弃，不再获取订单簿数据: {symbol}")
+        return None
 
     # 使用共同的 get_mid_price 函数来替代重复代码
 
@@ -589,7 +831,7 @@ class OrderManager:
         type="LIMIT",
         price=None,
         quantity=None,
-        is_wash_trading=False,
+        order_purpose="market_making",
     ):
         if not self._check_circuit_breaker():
             return None
@@ -622,6 +864,42 @@ class OrderManager:
             symbol=symbol, side=side, type=type, price=price, quantity=quantity
         )
 
+        # 🆕 第一阶段：记录 PENDING 状态到数据库
+        pending_order_id = None
+        if self.order_recorder:
+            try:
+                depth = self.depth if hasattr(self, "depth") else None
+                
+                pending_order_data = {
+                    "symbol": order.symbol,
+                    "order_id": f"PENDING_{order.clientOrderId}",  # 临时ID
+                    "client_order_id": order.clientOrderId,
+                    "side": order.side,
+                    "order_type": order.type,
+                    "price": float(order.price),
+                    "quantity": float(order.quantity),
+                    "status": "PENDING",  # 🔥 PENDING 状态
+                    "strategy_name": self.strategy_name,
+                    "order_purpose": order_purpose,
+                    "net_value": float(self.netvalue) if self.netvalue else None,
+                    "best_bid": float(depth["bids"][0][0])
+                    if depth and depth.get("bids")
+                    else None,
+                    "best_ask": float(depth["asks"][0][0])
+                    if depth and depth.get("asks")
+                    else None,
+                    "timestamp": datetime.now(timezone.utc),
+                }
+                
+                # 同步记录PENDING状态（使用线程安全调度）
+                self._schedule_async(self.order_recorder.record_order(pending_order_data))
+                pending_order_id = pending_order_data["order_id"]
+                logging.debug(f"📝 订单 {order.clientOrderId} 已记录 PENDING 状态")
+                
+            except Exception as e:
+                logging.error(f"记录PENDING状态失败: {e}")
+
+        # 🆕 第二阶段：向交易所发送订单
         try:
             response = self.client.order(
                 symbol=order.symbol,
@@ -635,29 +913,52 @@ class OrderManager:
                 quote_qty=order.quoteQty,
             )
             self._record_api_success()
+            
         except Exception as e:
             self._record_api_failure()
-            # API错误处理装饰器会处理告警发送
+            
+            # 🆕 订单失败 → 更新为 REJECTED 状态
+            if self.order_recorder and pending_order_id:
+                try:
+                    rejected_data = {
+                        "symbol": order.symbol,
+                        "order_id": pending_order_id,
+                        "client_order_id": order.clientOrderId,
+                        "side": order.side,
+                        "order_type": order.type,
+                        "price": float(order.price),
+                        "quantity": float(order.quantity),
+                        "status": "REJECTED",  # 🔥 REJECTED 状态
+                        "strategy_name": self.strategy_name,
+                        "order_purpose": order_purpose,
+                        "timestamp": datetime.now(timezone.utc),
+                        "extra_info": {"error": str(e)}
+                    }
+                    self._schedule_async(self.order_recorder.record_order(rejected_data))
+                    logging.warning(f"❌ 订单 {order.clientOrderId} 被拒绝: {e}")
+                except Exception as update_err:
+                    logging.error(f"更新REJECTED状态失败: {update_err}")
+            
             logging.error(f"下单失败: {e}")
             raise
 
-        # 记录订单到数据库
+        # 🆕 第三阶段：交易所确认成功 → 更新为 NEW 状态
         if response and self.order_recorder:
             try:
-                # 获取当前市场深度
                 depth = self.depth if hasattr(self, "depth") else None
+                exchange_order_id = response.get("orderId", "")
 
-                order_data = {
+                confirmed_order_data = {
                     "symbol": order.symbol,
-                    "order_id": response.get("orderId", ""),
+                    "order_id": exchange_order_id,  # 🔥 使用交易所返回的真实ID
                     "client_order_id": order.clientOrderId,
                     "side": order.side,
                     "order_type": order.type,
                     "price": float(order.price),
                     "quantity": float(order.quantity),
-                    "status": "NEW",
+                    "status": "NEW",  # 🔥 NEW 状态
                     "strategy_name": self.strategy_name,
-                    "is_wash_trading": is_wash_trading,
+                    "order_purpose": order_purpose,
                     "net_value": float(self.netvalue) if self.netvalue else None,
                     "best_bid": float(depth["bids"][0][0])
                     if depth and depth.get("bids")
@@ -669,7 +970,8 @@ class OrderManager:
                 }
 
                 # 使用线程安全的方式调度异步记录
-                self._schedule_async(self.order_recorder.record_order(order_data))
+                self._schedule_async(self.order_recorder.record_order(confirmed_order_data))
+                logging.debug(f"✅ 订单 {exchange_order_id} 已确认 NEW 状态")
 
             except Exception as e:
                 logging.error(f"记录订单失败: {e}")
@@ -677,7 +979,7 @@ class OrderManager:
         return response
 
     @handle_api_error
-    def add_orders_batch(self, order_data, batch_id=None, is_wash_trading=False):
+    def add_orders_batch(self, order_data, batch_id=None, order_purpose=None):
         if not self._check_circuit_breaker():
             return None
         
@@ -832,7 +1134,7 @@ class OrderManager:
                                 "quantity": float(original_order["quantity"]),
                                 "status": "NEW",
                                 "strategy_name": self.strategy_name,
-                                "is_wash_trading": is_wash_trading,
+                                "order_purpose": original_order.get("order_purpose", order_purpose or "market_making"),
                                 "net_value": float(self.netvalue)
                                 if self.netvalue
                                 else None,
@@ -975,29 +1277,131 @@ class OrderManager:
 
     def cancel_orders_bytier(self, symbol=None, tier_limit=None):
         # self.open_orders =
+        # 检查是否有该交易对的订单
+        if symbol not in self.open_orders or not self.open_orders[symbol]:
+            logging.info(f"没有找到 {symbol} 的挂单，跳过按档位取消")
+            return None
+
+        # 检查是否有足够的订单档位
+        if "SELL" not in self.open_orders[symbol] or "BUY" not in self.open_orders[symbol]:
+            logging.warning(f"{symbol} 的订单结构不完整，跳过按档位取消")
+            return None
+
+        # 计算实际可取消的档位数量（不超过现有订单数）
+        max_tiers = min(
+            len(self.open_orders[symbol].get("SELL", [])),
+            len(self.open_orders[symbol].get("BUY", [])),
+            tier_limit
+        )
+
+        if max_tiers == 0:
+            logging.info(f"{symbol} 没有足够的订单进行分档取消")
+            return None
+
         order_ids = []
-        for i in range(tier_limit):
-            order_ids.append(self.open_orders[symbol]["SELL"][i]["orderId"])
-            order_ids.append(self.open_orders[symbol]["BUY"][i]["orderId"])
+        for i in range(max_tiers):
+            try:
+                order_ids.append(self.open_orders[symbol]["SELL"][i]["orderId"])
+                order_ids.append(self.open_orders[symbol]["BUY"][i]["orderId"])
+            except (IndexError, KeyError) as e:
+                logging.warning(f"访问订单索引 {i} 时出错: {e}")
+                break
+
+        if not order_ids:
+            logging.info(f"{symbol} 没有可取消的订单")
+            return None
 
         response = self.cancel_orders_batch(order_ids=order_ids)
         return response
 
     @handle_api_error
-    def cancel_all_open_orders(self, symbol=None, biz_type="SPOT", side=None):
+    def cancel_all_open_orders(
+        self,
+        symbol=None,
+        biz_type="SPOT",
+        side=None,
+        cancellation_reason: str = "manual",
+        metadata: Optional[Dict] = None
+    ):
+        """撤销所有订单并记录原因
+        
+        Args:
+            symbol: 交易对
+            biz_type: 业务类型
+            side: 方向（可选）
+            cancellation_reason: 撤销原因
+                - "stop_loss_fixed": 固定止损触发
+                - "stop_loss_trailing": 移动止损触发
+                - "stop_loss_time": 时间止损触发
+                - "risk_level_1": 风险等级1（极高风险）
+                - "risk_level_2": 风险等级2（中等风险）
+                - "manual": 手动撤销
+                - "strategy_adjustment": 策略调整
+            metadata: 额外元数据（止损参数、风险评分等）
+        """
         if not self._check_circuit_breaker():
             return None
             
+        # 🆕 第一阶段：记录 PENDING_CANCEL 状态
+        order_ids = list(self.open_orders.keys())
+        
+        if self.order_recorder and len(order_ids) > 0:
+            try:
+                self._schedule_async(
+                    self.order_recorder.record_order_cancellation(
+                        order_ids=order_ids,
+                        symbol=symbol,
+                        cancellation_reason=cancellation_reason,
+                        metadata=metadata
+                    )
+                )
+                logging.info(
+                    f"📝 记录撤单请求: {len(order_ids)} 个订单 → PENDING_CANCEL, "
+                    f"原因: {cancellation_reason}"
+                )
+            except Exception as e:
+                logging.error(f"记录PENDING_CANCEL状态失败: {e}")
+            
+        # 🆕 第二阶段：向交易所发送撤单请求
         try:
             response = self.client.cancel_open_orders(
                 symbol=symbol, biz_type=biz_type, side=side
             )
             self._record_api_success()
+            
+            # 🆕 第三阶段：撤单成功 → 确认 CANCELED 状态
+            if response and self.order_recorder and len(order_ids) > 0:
+                try:
+                    self._schedule_async(
+                        self.order_recorder.confirm_order_cancellation(
+                            order_ids=order_ids,
+                            success=True
+                        )
+                    )
+                    logging.info(f"✅ 撤单成功: {len(order_ids)} 个订单 → CANCELED")
+                except Exception as e:
+                    logging.error(f"确认CANCELED状态失败: {e}")
+            
             if response:
                 self.open_orders = {}
             return response
+            
         except Exception as e:
             self._record_api_failure()
+            
+            # 🆕 撤单失败 → 确认 CANCEL_REJECTED 状态
+            if self.order_recorder and len(order_ids) > 0:
+                try:
+                    self._schedule_async(
+                        self.order_recorder.confirm_order_cancellation(
+                            order_ids=order_ids,
+                            success=False
+                        )
+                    )
+                    logging.warning(f"❌ 撤单失败: {len(order_ids)} 个订单 → CANCEL_REJECTED")
+                except Exception as update_err:
+                    logging.error(f"确认CANCEL_REJECTED状态失败: {update_err}")
+            
             raise
 
     def write_orders2(self):
@@ -1017,6 +1421,27 @@ class OrderManager:
         self.filled_orders = []
 
     def write_history_orders(self):
+        """
+        【已弃用】历史订单CSV记录功能
+
+        此方法已被弃用，订单数据现在统一通过OrderStateManager和order_recorder
+        持久化到PostgreSQL数据库。保留此方法仅为向后兼容。
+
+        弃用原因：
+        1. CSV与数据库双重记录导致数据不一致
+        2. CSV缺乏事务性和并发安全
+        3. PostgreSQL提供更好的查询和分析能力
+
+        迁移指南：
+        - 订单状态变更会自动记录到数据库
+        - 查询历史订单请使用order_recorder.query_orders()
+        - 如需导出CSV，使用order_recorder的导出功能
+        """
+        logging.warning(
+            "write_history_orders() 已弃用，订单数据自动持久化到PostgreSQL。"
+            "此调用将被忽略。"
+        )
+        return
         """
         write history orders to local csv file,
         1. filled orders
@@ -1081,11 +1506,11 @@ class OrderManager:
             return await self.order_recorder.get_order_stats(symbol)
         return {}
 
-    def record_trade(self, trade_data: Dict[str, Any], is_wash_trading: bool = False):
+    def record_trade(self, trade_data: Dict[str, Any], trade_purpose: str = "market_making"):
         """记录成交数据"""
         if self.order_recorder:
             trade_data["strategy_name"] = self.strategy_name
-            trade_data["is_wash_trading"] = is_wash_trading
+            trade_data["trade_purpose"] = trade_purpose
             # 使用线程安全的方式调度异步记录
             self._schedule_async(self.order_recorder.record_trade(trade_data))
 
@@ -1154,64 +1579,28 @@ class OrderManager:
 
     def write_orders(self):
         """
-        write history orders to local csv file,
-        1. check filled orders and remove them from csv file before writing
+        【已弃用】订单CSV记录功能
 
-        2. check canceled orders and remove them from csv file before writing && remove them from the open_orders
-        3. canceled orders are the orders from market should in csv file
+        此方法已被弃用，订单数据现在统一通过OrderStateManager和order_recorder
+        持久化到PostgreSQL数据库。保留此方法仅为向后兼容。
+
+        弃用原因：
+        1. CSV与数据库双重记录导致数据不一致
+        2. CSV文件操作缺乏原子性和并发安全性
+        3. 状态重置操作（清空open_orders, filled_orders）可能导致数据丢失
+        4. PostgreSQL提供更好的查询、分析和审计能力
+
+        迁移指南：
+        - 订单状态由OrderStateManager统一管理，自动持久化
+        - 查询未完成订单：通过self.open_orders访问（实时缓存）
+        - 查询历史订单：使用order_recorder.query_orders()
+        - 如需导出CSV：使用order_recorder的导出功能
         """
-
-        # load csv first
-        data = self.read_orders()
-
-        # logging.info(f"check filled orders and remove them from csv file before writing: {data}")
-        self.remove_data = self.filled_orders + self.canceled_orders
-
-        logging.info(f"############ remove filled orders {self.filled_orders}")
-        # logging.info(f"############ remove orders from cancel orders {self.canceled_orders}")
-
-        local_data = [
-            item for item in data if str(item["orderId"]) not in self.remove_data
-        ]
-        data_ids = [str(item["orderId"]) for item in data]
-        logging.info(f"comparing {len(data_ids)} data in csv")
-        keep_data = [
-            orderid for orderid in self.canceled_orders if orderid not in data_ids
-        ]  # strange
-        self.canceled_orders = deepcopy(keep_data)
-        # logging.info(f"{self.canceled_orders}")
-
-        # if len(self.canceled_orders) > 0:
-
-        #    response = self.client.get_batch_orders([str(order_id) for order_id in self.canceled_orders])
-        #    i = 0
-        #    for res in response:
-
-        #        logging.info(f"CANCELED orders id {self.canceled_orders[i]} {type(self.canceled_orders[i])} NOT in csv file: price {res['price']} leavingQty{res['leavingQty']} state {res['state']}")
-        #        i += 1
-
-        # logging.info(data_ids)
-        logging.info(
-            f"########### found {len(data)} orders in local, keep {len(local_data)} orders"
+        logging.warning(
+            "write_orders() 已弃用，订单数据由OrderStateManager自动管理。"
+            "此调用将被忽略。"
         )
-        logging.info(f"keep canceled_orders {len(self.canceled_orders)}")
-        existing_ids = {str(item["orderId"]) for item in local_data}
-        new_data = local_data + [
-            order
-            for order in self.open_orders.values()
-            if str(order["orderId"]) not in existing_ids
-        ]
-        # logging.info(new_data)
-        df = pd.DataFrame(new_data)
-        logging.info(f"writing {len(df)} open orders in to csv file")
-        logging.info(f"new open orders length: {len(new_data) - len(local_data)}")
-        logging.info(f"local open orders length: {len(local_data)}")
-
-        df.to_csv(self.open_orders_csv_file, mode="w", index=False, header=True)
-
-        # reset all datas
-        self.open_orders = {}
-        self.filled_orders = []
+        return
 
     ###
     # order manager system
@@ -1238,15 +1627,26 @@ class OrderManager:
         return balance
 
     def get_position3(self, symbol, currencies):
-        depth = self.get_depth_data(symbol)
-        mid_price = get_mid_price(depth)
+        """
+        获取持仓信息（已改为使用市场价格，不再依赖订单簿）
+        
+        Returns:
+            tuple: (delta_position, position, price, delta_amount)
+        """
+        # 使用市场价格替代中间价
+        try:
+            ticker = self.client.ticker(symbol)
+            mid_price = float(ticker["price"])
+        except Exception as e:
+            logging.warning(f"获取市场价格失败: {e}，使用上次价格")
+            mid_price = getattr(self, '_last_mid_price', 0)
+        
+        # 缓存价格
+        self._last_mid_price = mid_price
+        
         info = self.client.balances(currencies)
         for currency in info["assets"]:
             if currency["currency"] == symbol.split("_")[0].lower():
-                # if float(currency["totalAmount"]) == self.last_amount:
-                #    continue
-                # if self.last_amount_5l is None:
-                #    self.last_amount_5l =
                 delta_amount = (
                     float(currency["totalAmount"]) - self.last_amount
                 )  # if < 0, user buy, > 0, user sell
@@ -1254,7 +1654,6 @@ class OrderManager:
                 delta_position = delta_amount * mid_price
                 self.last_amount = float(currency["totalAmount"])
                 self.position = position_amount * mid_price
-                # self.delta_amount = delta_amount
 
         return delta_position, self.position, mid_price, delta_amount
 
@@ -1306,7 +1705,10 @@ class OrderManager:
                 for res in response:
                     if res["state"] == "CANCELED":
                         current_time = time.time()
-                        self.canceled_orders.append({
+
+                        # ✅ 使用OrderStateManager统一处理订单取消
+                        # 替换原有的直接操作：self.canceled_orders.append(...)
+                        canceled_order_data = {
                             "symbol": res["symbol"],
                             "side": res["side"],
                             "price": res["price"],
@@ -1317,7 +1719,15 @@ class OrderManager:
                                 current_time, tz=timezone.utc
                             ).astimezone(timezone(timedelta(hours=8))),
                             "state": res["state"],
-                        })
+                        }
+
+                        self.state_manager.update_order_state(
+                            order_id=res["orderId"],
+                            new_state='CANCELED',
+                            order_data=canceled_order_data,
+                            trigger_source='rest_api'
+                        )
+
                         del self.sent_orders[res["orderId"]]
 
                     elif res["state"] == "PARTIALLY_FILLED":
@@ -1406,7 +1816,15 @@ class OrderManager:
                             ).astimezone(timezone(timedelta(hours=8))),
                             "state": res["state"],
                         }
-                        self.filled_orders.append(filled_order_data)
+
+                        # ✅ 使用OrderStateManager统一处理订单成交
+                        # 替换原有的直接操作：self.filled_orders.append(...)
+                        self.state_manager.update_order_state(
+                            order_id=res["orderId"],
+                            new_state='FILLED',
+                            order_data=filled_order_data,
+                            trigger_source='rest_api'
+                        )
 
                         # 记录成交到数据库
                         trade_data = {
@@ -1420,9 +1838,9 @@ class OrderManager:
                             "traded_at": datetime.fromtimestamp(current_time, tz=timezone.utc),
                             "strategy_name": self.strategy_name if hasattr(self, 'strategy_name') else None,
                         }
-                        # 判断是否为洗盘交易（可以根据订单来源判断）
-                        is_wash = res.get("is_wash_trading", False)
-                        self.record_trade(trade_data, is_wash_trading=is_wash)
+                        # 从订单信息中提取交易用途
+                        trade_purpose = res.get("order_purpose", "market_making")
+                        self.record_trade(trade_data, trade_purpose=trade_purpose)
 
                         self.trading_history.append({
                             "orderId": res["orderId"],
@@ -1453,9 +1871,36 @@ class OrderManager:
         return delta_position, self.position, mid_price, self.amount
 
     def get_position(self, symbol):
+        """获取当前持仓信息
+        
+        优先使用WebSocket缓存的订单数据，降级到REST API轮询。
+        
+        数据源优先级：
+        1. WebSocket实时订单缓存（如果已启用且连接正常）
+        2. REST API轮询（reset_open_orders + get_batch_orders）
+        
+        Args:
+            symbol: 交易对符号
+            
+        Returns:
+            tuple: (delta_position, position, mid_price, amount)
+        """
         # self.rese
         # self.write_history_orders()
-        self.reset_open_orders(symbol)
+        
+        # ✅ 优先使用WebSocket缓存，避免REST API调用
+        if self.use_order_websocket and self.order_ws_client:
+            # 检查WebSocket连接状态
+            ws_stats = self.order_ws_client.get_stats()
+            if ws_stats.get('connected', False):
+                logging.debug("使用WebSocket订单缓存（跳过reset_open_orders）")
+                # WebSocket已经实时更新了self.open_orders，无需再次查询
+            else:
+                logging.warning("WebSocket未连接，降级到REST API轮询")
+                self.reset_open_orders(symbol)
+        else:
+            # WebSocket未启用，使用传统REST API轮询
+            self.reset_open_orders(symbol)
 
         order_ids = [str(order_id) for order_id in self.open_orders]
         logging.info(self.open_orders)
@@ -1587,13 +2032,20 @@ class OrderManager:
                             "traded_at": datetime.fromtimestamp(current_time, tz=timezone.utc),
                             "strategy_name": self.strategy_name if hasattr(self, 'strategy_name') else None,
                         }
-                        # 判断是否为洗盘交易（可以根据订单来源判断）
-                        is_wash = res.get("is_wash_trading", False)
-                        self.record_trade(trade_data, is_wash_trading=is_wash)
+                        # 从订单信息中提取交易用途
+                        trade_purpose = res.get("order_purpose", "market_making")
+                        self.record_trade(trade_data, trade_purpose=trade_purpose)
 
-                        # remove order
-                        self.filled_orders.append(res["orderId"])
-                        self.remove_order(res["orderId"])
+                        # ✅ 使用OrderStateManager统一处理订单状态变更
+                        # 替换原有的直接操作：
+                        #   self.filled_orders.append(res["orderId"])
+                        #   self.remove_order(res["orderId"])
+                        self.state_manager.update_order_state(
+                            order_id=res["orderId"],
+                            new_state='FILLED',
+                            order_data=res,
+                            trigger_source='rest_api'
+                        )
 
                         # if res["orderId"] in pre_order_ids:
                         #     self.filled_orders.append(res["orderId"])
@@ -1614,26 +2066,77 @@ class OrderManager:
 
         return delta_position, self.position, mid_price, self.amount
 
-    def risk_actions(self, risk_level):
+    def risk_actions(self, risk_level, symbol=None):
         """
-        Level 1: stop market making and wash trading, cancel all orders
-        Level 2: stop market making and wash trading, gradually cancel near-end orders within 6 senconds, remain 1/3 far-end orders, reduce order amount to 1/10
-        Level 3: continue market making
+        风险等级响应策略：
+        Level 1: 极高风险 - 立即停止交易，取消所有订单
+        Level 2: 中等风险 - 允许继续交易，但如果有订单则分档减少（渐进式风控）
+        Level 3: 正常 - 正常交易
+
+        修改记录 (2025-01-24):
+        - Level 2 现在允许继续交易（返回 True）
+        - Level 2 仅在有订单时执行分档撤单（启动时跳过）
+        - 修复了启动阶段 Level 2 无法启动的问题
         """
 
         if risk_level == 1:
-            self.cancel_all_open_orders()
+            # 极高风险：立即停止所有交易
+            self.cancel_all_open_orders(symbol=symbol)
             return False
 
         elif risk_level == 2:
-            self.cancel_orders_bytier(tier_limit=int(self.tier / 5))
-            time.sleep(3)
-            self.cancel_orders_bytier(tier_limit=int(self.tier / 3))
-            time.sleep(2)
-            self.cancel_orders_bytier(tier_limit=int(self.tier / 2))
-            time.sleep(1)
-            self.cancel_orders_bytier(tier_limit=int(self.tier * 2 / 3))
-            return False
+            # 中等风险：允许继续交易，但如果有订单则分档减少风险敞口
+            if symbol in self.open_orders and self.open_orders[symbol]:
+                logging.info(f"风险等级 {risk_level}: 执行分档撤单以减少风险敞口")
+                self.cancel_orders_bytier(symbol=symbol, tier_limit=int(self.tier / 5))
+                time.sleep(3)
+                self.cancel_orders_bytier(symbol=symbol, tier_limit=int(self.tier / 3))
+                time.sleep(2)
+                self.cancel_orders_bytier(symbol=symbol, tier_limit=int(self.tier / 2))
+                time.sleep(1)
+                self.cancel_orders_bytier(symbol=symbol, tier_limit=int(self.tier * 2 / 3))
+            else:
+                logging.info(f"风险等级 {risk_level}: 无订单，跳过分档撤单，允许继续交易")
+            return True  # ✅ 允许继续交易
 
         elif risk_level == 3:
+            # 正常风险：正常交易
             return True
+
+    def cleanup(self):
+        """清理资源
+        
+        在程序退出或OrderManager销毁时调用，用于：
+        1. 停止WebSocket订单监听器
+        2. 关闭后台事件循环线程
+        3. 释放其他资源
+        
+        应该在程序退出时显式调用此方法，确保资源正确释放。
+        
+        示例：
+            order_manager = OrderManager(...)
+            try:
+                # 正常运行
+                pass
+            finally:
+                order_manager.cleanup()
+        """
+        logging.info("开始清理OrderManager资源...")
+        
+        # 停止WebSocket订单监听器
+        if self.order_ws_client:
+            try:
+                self.order_ws_client.stop()
+                logging.info("订单WebSocket已停止")
+            except Exception as e:
+                logging.error(f"停止订单WebSocket失败: {e}")
+        
+        # 关闭订单记录器的后台事件循环
+        if hasattr(self, '_recorder_running') and self._recorder_running:
+            try:
+                self.shutdown_recorder()
+                logging.info("订单记录器后台线程已停止")
+            except Exception as e:
+                logging.error(f"停止订单记录器失败: {e}")
+        
+        logging.info("OrderManager资源清理完成")
