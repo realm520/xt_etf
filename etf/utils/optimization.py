@@ -114,14 +114,23 @@ def binary_search_right(arr: List[float], target: float) -> int:
 
 def optimize_order_matching(
     current_orders: List[Dict[str, Any]],
-    goal_orders: List[Dict[str, Any]]
+    goal_orders: List[Dict[str, Any]],
+    max_layer: Optional[int] = None,  # 新增：最大档位数限制
+    cleanup_threshold: float = 1.5,   # 新增：清理阈值（150%）
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     优化的订单匹配算法，将O(n²)复杂度降低到O(n log n)
     
+    改进：
+    1. 保留原有价格范围匹配逻辑
+    2. 添加超范围订单自动清理
+    3. 添加订单数量上限保护
+    
     Args:
         current_orders: 当前订单列表
         goal_orders: 目标订单列表
+        max_layer: 最大档位数（可选，用于订单数量保护）
+        cleanup_threshold: 清理阈值（默认150%，当订单数超过max_layer*1.5时强制清理）
         
     Returns:
         Tuple: (需要添加的订单, 需要取消的订单)
@@ -131,6 +140,16 @@ def optimize_order_matching(
     
     add_orders = []
     cancel_orders = []
+    
+    # 计算目标价格范围（用于识别超范围订单）
+    if goal_orders:
+        all_min_prices = [goal["min_price"] for goal in goal_orders]
+        all_max_prices = [goal["max_price"] for goal in goal_orders]
+        global_min_price = min(all_min_prices)
+        global_max_price = max(all_max_prices)
+    else:
+        global_min_price = 0
+        global_max_price = float('inf')
     
     # 遍历目标订单，O(m * log n)，其中m是goal_orders数量
     for goal in goal_orders:
@@ -183,6 +202,72 @@ def optimize_order_matching(
                     cancel_orders.append(order)
                 
                 excess_amount -= cancel_amount
+    
+    # ========== 新增：超范围订单清理逻辑 ==========
+    
+    # 1. 识别并清理超出目标价格范围的订单（增加缓冲区）
+    # 计算价格缓冲区：目标范围的5%，避免过度清理
+    price_range = global_max_price - global_min_price
+    buffer = price_range * 0.05  # 5%缓冲区
+    
+    buffered_min_price = global_min_price - buffer
+    buffered_max_price = global_max_price + buffer
+    
+    out_of_range_orders = []
+    for order in current_orders:
+        try:
+            price = float(order.get("price", 0))
+            # 订单价格明显超出缓冲范围 → 标记为待取消
+            if price < buffered_min_price or price > buffered_max_price:
+                if order not in cancel_orders:  # 避免重复
+                    out_of_range_orders.append(order)
+        except (ValueError, TypeError):
+            logging.warning(f"Invalid order price, skipping: {order}")
+            continue
+    
+    if out_of_range_orders:
+        logging.info(
+            f"🧹 发现 {len(out_of_range_orders)} 个超范围订单 "
+            f"(目标范围: {global_min_price:.6f} ~ {global_max_price:.6f}, "
+            f"缓冲范围: {buffered_min_price:.6f} ~ {buffered_max_price:.6f})"
+        )
+        cancel_orders.extend(out_of_range_orders)
+    
+    # 2. 订单数量上限保护（可选）
+    if max_layer is not None:
+        order_limit = int(max_layer * cleanup_threshold)
+        
+        if len(current_orders) > order_limit:
+            logging.warning(
+                f"⚠️ 订单数量超标: {len(current_orders)} > {order_limit} "
+                f"(配置: {max_layer}, 阈值: {cleanup_threshold:.0%})"
+            )
+            
+            # 统计需要清理的数量
+            need_cleanup = len(current_orders) - max_layer
+            
+            # 按价格偏离度排序，优先清理偏离最远的订单
+            mid_price = (global_min_price + global_max_price) / 2
+            
+            sorted_orders = sorted(
+                current_orders,
+                key=lambda o: abs(float(o.get("price", 0)) - mid_price),
+                reverse=True  # 偏离最远的排在前面
+            )
+            
+            # 清理偏离最远的订单
+            for i, order in enumerate(sorted_orders):
+                if i >= need_cleanup:
+                    break
+                if order not in cancel_orders:  # 避免重复
+                    cancel_orders.append(order)
+            
+            logging.info(
+                f"🧹 强制清理 {min(need_cleanup, len(sorted_orders))} 个偏离订单 "
+                f"(目标: {max_layer}档)"
+            )
+    
+    # ========== 结束：清理逻辑 ==========
     
     return add_orders, cancel_orders
 

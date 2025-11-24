@@ -7,7 +7,7 @@ from etf.stability_monitor import StabilityMonitor
 from etf.websocket import XTWebSocketClient
 from etf.symbol_config import SymbolConfigManager  # Symbol配置管理器
 from hedging import Hedge
-from etf.observability import init_otel, MetricsCollector  # OpenTelemetry 集成
+from etf.observability import init_otel, MetricsCollector, PrometheusServer  # Prometheus 集成
 from etf.utils.logger import setup_logging  # 新增：统一日志配置工具
 import json
 import time
@@ -565,6 +565,12 @@ if __name__ == "__main__":
     if "currencies" in strategy_config:
         config["currencies"] = strategy_config["currencies"]
 
+    # ✅ 添加订单簿算法配置（重要！）
+    if "orderbook_algorithm" in strategy_config:
+        config["orderbook_algorithm"] = strategy_config["orderbook_algorithm"]
+    if "orderbook_config" in strategy_config:
+        config["orderbook_config"] = strategy_config["orderbook_config"]
+
     # 添加策略名称用于特殊处理
     if args.strategy:
         config["strategy_name"] = args.strategy
@@ -657,29 +663,77 @@ if __name__ == "__main__":
         retention_days=30,
     )
 
-    # ===== 初始化 OpenTelemetry 可观测性 =====
-    try:
-        otlp_endpoint = os.getenv("OTLP_ENDPOINT", "http://localhost:4317")
-        enable_otel = os.getenv("ENABLE_OTEL", "true").lower() == "true"
+    # ===== 初始化 Prometheus 可观测性（Pull 模式）=====
+    prometheus_server = None
+    metrics_collector = None
 
-        if enable_otel:
-            meter = init_otel(
-                service_name=f"etf-{strategy_name}",
-                otlp_endpoint=otlp_endpoint,
-                enable_metrics=True,
-                enable_traces=False,  # Traces 可选
-                export_interval_ms=10000,  # 10秒导出一次
-                environment=config.get("env", "production")
-            )
-            metrics_collector = MetricsCollector(meter)
-            logging.info(f"✅ OpenTelemetry 初始化成功: endpoint={otlp_endpoint}")
+    try:
+        # 读取配置
+        enable_metrics = os.getenv("ENABLE_METRICS", "true").lower() == "true"
+        metrics_mode = os.getenv("METRICS_EXPORT_MODE", "prometheus")  # prometheus | otlp
+        prometheus_port = int(os.getenv("PROMETHEUS_PORT", "8000"))
+
+        if enable_metrics:
+            if metrics_mode == "prometheus":
+                # Prometheus Pull 模式（推荐）
+                registry, _ = init_otel(
+                    service_name=f"etf-{strategy_name}",
+                    export_mode="prometheus",
+                    prometheus_port=prometheus_port,
+                    environment=config.get("env", "production")
+                )
+
+                # 创建 MetricsCollector
+                metrics_collector = MetricsCollector(registry)
+
+                # 启动 Prometheus HTTP 服务器
+                prometheus_server = PrometheusServer(
+                    port=prometheus_port,
+                    addr='0.0.0.0',
+                    registry=registry
+                )
+
+                if prometheus_server.start():
+                    logging.info(f"✅ Prometheus 初始化成功")
+                    logging.info(f"   Metrics 端点: {prometheus_server.get_metrics_url()}")
+                    logging.info(f"   提示: 在 Prometheus 配置中添加:")
+                    logging.info(f"     - targets: ['localhost:{prometheus_port}']")
+                else:
+                    logging.error("❌ Prometheus HTTP 服务器启动失败")
+                    prometheus_server = None
+
+            elif metrics_mode == "otlp":
+                # OTLP Push 模式（兼容旧版）
+                logging.warning("⚠️  使用 OTLP Push 模式（不推荐）")
+                otlp_endpoint = os.getenv("OTLP_ENDPOINT", "http://localhost:4317")
+
+                _, _ = init_otel(
+                    service_name=f"etf-{strategy_name}",
+                    otlp_endpoint=otlp_endpoint,
+                    export_mode="otlp",
+                    enable_traces=False,
+                    export_interval_ms=10000,
+                    environment=config.get("env", "production")
+                )
+
+                # 注意：OTLP 模式下需要使用旧的 MetricsCollector 初始化方式
+                from opentelemetry import metrics as otel_metrics
+                meter = otel_metrics.get_meter(f"etf-{strategy_name}")
+                metrics_collector = MetricsCollector(meter)
+
+                logging.info(f"✅ OTLP 初始化成功: endpoint={otlp_endpoint}")
+                logging.warning("   建议迁移到 Prometheus 模式：METRICS_EXPORT_MODE=prometheus")
+            else:
+                logging.error(f"❌ 不支持的 Metrics 导出模式: {metrics_mode}")
         else:
-            metrics_collector = None
-            logging.info("⏸️ OpenTelemetry 已禁用 (ENABLE_OTEL=false)")
+            logging.info("⏸️ Metrics 已禁用 (ENABLE_METRICS=false)")
+
     except Exception as e:
-        logging.error(f"❌ OpenTelemetry 初始化失败: {e}")
+        logging.error(f"❌ Metrics 初始化失败: {e}")
         logging.warning("系统将继续运行，但不会导出 Metrics")
+        logging.exception(e)
         metrics_collector = None
+        prometheus_server = None
 
     # ===== 初始化 WebSocket 客户端（用于实时depth数据） =====
     ws_client = None
