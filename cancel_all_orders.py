@@ -1,9 +1,22 @@
 import json
+import argparse
 from etf.xt import Spot
 from etf.order_manager import OrderManager
 
 
 if __name__ == "__main__":
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='取消指定交易对的所有订单或下测试单')
+    parser.add_argument('--symbol', type=str, default='stt5l_usdt',
+                       help='交易对名称 (默认: stt5l_usdt)')
+    parser.add_argument('--action', type=str, default='test_order',
+                       choices=['cancel_all', 'test_order'],
+                       help='操作类型: cancel_all=取消所有订单, test_order=下测试单 (默认: test_order)')
+    parser.add_argument('--price', type=float, default=1.0,
+                       help='测试订单价格 (默认: 1.0)')
+    parser.add_argument('--quantity', type=float, default=10.0,
+                       help='测试订单数量 (默认: 10.0)')
+    args = parser.parse_args()
     
     config = { 
         'prefixs': ["stg5s"],
@@ -19,16 +32,25 @@ if __name__ == "__main__":
             secret_key=apikey["xt_" + prefix]["secret_key"])
 
         order_manager = OrderManager(spot)
-        # order_manager.cancel_all_open_orders(prefix + "_usdt") 
-        order_data = {
-            "symbol": "stt5l_usdt",
-            "clientOrderId": order_manager.create_temp_id(),
-            "side": "SELL",
-            "type": "LIMIT",
-            "timeInForce": "GTC",
-            "bizType": "SPOT",
-            "price": 1,
-            "quantity": 10,
-            "quoteQty": None
-        }
-        response = order_manager.add_orders_batch([order_data], batch_id=51232, is_wash_trading=False)
+
+        # 根据action参数执行不同操作
+        if args.action == 'cancel_all':
+            print(f"取消 {args.symbol} 的所有订单...")
+            order_manager.cancel_all_open_orders(args.symbol)
+            print("完成!")
+        else:  # test_order
+            print(f"为 {args.symbol} 下测试单...")
+            print(f"  价格: {args.price}, 数量: {args.quantity}")
+            order_data = {
+                "symbol": args.symbol,
+                "clientOrderId": order_manager.create_temp_id(),
+                "side": "SELL",
+                "type": "LIMIT",
+                "timeInForce": "GTC",
+                "bizType": "SPOT",
+                "price": args.price,
+                "quantity": args.quantity,
+                "quoteQty": None
+            }
+            response = order_manager.add_orders_batch([order_data], batch_id=51232, order_purpose="manual")
+            print(f"响应: {response}")
