@@ -38,9 +38,6 @@ strategies:
     Enable_wash_trading: true
     Enable_hedging: false
     Enable_market_making: true
-    cancel_all_open_orders: true
-    # ❌ pre_make_orders: false  # 已废弃 (2025-11-21)
-    Exit_with_cancel_all_open_orders: false
 
     # 交易参数
     leverage: 3
@@ -119,9 +116,6 @@ strategies:
     Enable_wash_trading: true
     Enable_hedging: false
     Enable_market_making: true
-    cancel_all_open_orders: true
-    # ❌ pre_make_orders: false  # 已废弃 (2025-11-21)
-    Exit_with_cancel_all_open_orders: false
 
     # 交易参数
     leverage: 3
@@ -189,9 +183,6 @@ strategies:
     Enable_wash_trading: true
     Enable_hedging: false
     Enable_market_making: true
-    cancel_all_open_orders: false
-    # ❌ pre_make_orders: false  # 已废弃 (2025-11-21)
-    Exit_with_cancel_all_open_orders: false
 
     # 交易参数
     leverage: 5
@@ -259,9 +250,6 @@ strategies:
     Enable_wash_trading: true
     Enable_hedging: false
     Enable_market_making: true
-    cancel_all_open_orders: false
-    # ❌ pre_make_orders: false  # 已废弃 (2025-11-21)
-    Exit_with_cancel_all_open_orders: false
 
     # 交易参数
     leverage: 5
@@ -329,9 +317,6 @@ strategies:
     Enable_wash_trading: true
     Enable_hedging: false
     Enable_market_making: true
-    cancel_all_open_orders: true    # STG5L 特有：启动时取消所有订单
-    # ❌ pre_make_orders: false  # 已废弃 (2025-11-21)
-    Exit_with_cancel_all_open_orders: false
 
     # 交易参数
     leverage: 5
@@ -399,9 +384,6 @@ strategies:
     Enable_wash_trading: true
     Enable_hedging: false
     Enable_market_making: true
-    cancel_all_open_orders: false
-    # ❌ pre_make_orders: false  # 已废弃 (2025-11-21)
-    Exit_with_cancel_all_open_orders: false
 
     # 交易参数
     leverage: 5

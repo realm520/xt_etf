@@ -26,7 +26,6 @@ defaults: &defaults
   Enable_market_making: true
   cancel_all_open_orders: false
   pre_make_orders: false
-  Exit_with_cancel_all_open_orders: false
   
   # 交易参数 - 通用默认值
   leverage: 5
