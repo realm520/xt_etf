@@ -19,6 +19,7 @@ import argparse
 import yaml
 import os
 import asyncio
+import sys
 
 # 暂时使用基础配置，等策略名称确定后会重新配置
 logging.shutdown()
@@ -59,7 +60,9 @@ class EtfStrategy:
                 or config.get("prefix") == "stg5s"
             ):
                 order_manager.cancel_all_open_orders(config["symbol"])
-            if len(depth["asks"]) != 0 or len(depth["bids"]) != 0:
+            
+            # 检查depth是否可用（防止None或空订单簿）
+            if depth and (len(depth.get("asks", [])) != 0 or len(depth.get("bids", [])) != 0):
                 try:
                     order_manager.cancel_all_open_orders(config["symbol"])
                     time.sleep(10)
@@ -125,6 +128,11 @@ class EtfStrategy:
                 # ✅ 持仓信息更新（用于止损计算）
                 if risk_controller.stop_loss_manager and config.get("currencies"):
                     try:
+                        # 检查订单簿是否可用
+                        if not depth or not depth.get('bids') or not depth.get('asks'):
+                            logging.debug("⏭️ 订单簿为空，跳过本次止损更新")
+                            continue
+                        
                         # 获取当前持仓信息
                         delta_pos, position, mid_price, delta_amt = order_manager.get_position3(
                             config["symbol"], config["currencies"]
@@ -244,7 +252,7 @@ class EtfStrategy:
                         logging.error(f"止损检查失败: {e}")
 
                 # ✅ 风险等级检查：根据风险等级决定是否继续交易
-                if not order_manager.risk_actions(risk_controller.risk_level):
+                if not order_manager.risk_actions(risk_controller.risk_level, symbol=config["symbol"]):
                     logging.warning(f"风险等级 {risk_controller.risk_level} 过高，暂停市场做市")
                     continue
 
@@ -806,7 +814,9 @@ if __name__ == "__main__":
 
     # market maker related
     # 传递策略名称和Symbol配置管理器给 OrderManager
-    order_manager = OrderManager(spot, strategy_name=strategy_name, symbol_config=symbol_config_manager)
+    # 从配置中读取订单档位数量（layer），默认500
+    tier = config.get("orderbook_config", {}).get("layer", 500)
+    order_manager = OrderManager(spot, strategy_name=strategy_name, symbol_config=symbol_config_manager, tier=tier)
     
     # 启用资金检查（如果配置中启用）
     balance_check_config = config.get("balance_check", {})
@@ -887,7 +897,7 @@ if __name__ == "__main__":
         print(
             f"init market making {config['symbol']} amount {order_manager.last_amount}"
         )
-    if order_manager.risk_actions(risk_controller.risk_level):
+    if order_manager.risk_actions(risk_controller.risk_level, symbol=config["symbol"]):
         market_maker = MarketMaker(order_manager)
         wash_controller = WashController(order_manager, market_maker)
 
@@ -903,27 +913,30 @@ if __name__ == "__main__":
         # ❌ make_orders 已废弃 (2025-11-21)
         hedging = Hedge()
 
-    # thread2 = threading.Thread(target=EtfStrategy.run, args=(config, risk_controller, wash_controller, market_maker))
-    if config["Enable_hedging"]:
-        thread3 = threading.Thread(
-            target=hedging.run, args=(order_manager, config), daemon=True
-        )
-    if config["Enable_wash_trading"]:
-        thread4 = threading.Thread(
-            target=wash_controller.run, args=(risk_controller, config), daemon=True
-        )
+        # thread2 = threading.Thread(target=EtfStrategy.run, args=(config, risk_controller, wash_controller, market_maker))
+        if config["Enable_hedging"]:
+            thread3 = threading.Thread(
+                target=hedging.run, args=(order_manager, config), daemon=True
+            )
+        if config["Enable_wash_trading"]:
+            thread4 = threading.Thread(
+                target=wash_controller.run, args=(risk_controller, config), daemon=True
+            )
 
-    # thread2.start()
-    if config["Enable_hedging"]:
-        thread3.start()
-    if config["Enable_wash_trading"]:
-        thread4.start()
+        # thread2.start()
+        if config["Enable_hedging"]:
+            thread3.start()
+        if config["Enable_wash_trading"]:
+            thread4.start()
 
-    # thread2.join()
-    # if config["Enable_hedging"]:
-    #     thread3.join()
-    # if config["Enable_wash_trading"]:
-    #     thread4.join()
-    if config["Enable_market_making"]:
-        # 传递 depth 参数，避免在 run 方法中重复调用 API
-        EtfStrategy.run(config, risk_controller, wash_controller, market_maker, stability_monitor, depth)
+        # thread2.join()
+        # if config["Enable_hedging"]:
+        #     thread3.join()
+        # if config["Enable_wash_trading"]:
+        #     thread4.join()
+        if config["Enable_market_making"]:
+            # 传递 depth 参数，避免在 run 方法中重复调用 API
+            EtfStrategy.run(config, risk_controller, wash_controller, market_maker, stability_monitor, depth)
+    else:
+        logging.error(f"风险等级 {risk_controller.risk_level} 过高，无法启动策略")
+        sys.exit(1)

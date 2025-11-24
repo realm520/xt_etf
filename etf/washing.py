@@ -503,7 +503,7 @@ class WashController:
             
             # 批量下单
             res = self.order_manager.add_orders_batch(
-                orders_data, batch_id=DEFAULT_BATCH_ID, is_wash_trading=True
+                orders_data, batch_id=DEFAULT_BATCH_ID, order_purpose="wash_trading"
             )
             logging.debug(f"洗盘批量下单结果: {len(micro_trades)}笔, 响应={res}")
 

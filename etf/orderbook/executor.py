@@ -138,9 +138,12 @@ class OrderExecutor:
             current_orders, target_orders
         )
 
-        # 为每个新订单设置clientOrderId
+        # 为每个新订单设置clientOrderId和order_purpose
         for order_data in optimized_add_orders:
             order_data["clientOrderId"] = self.order_manager.create_temp_id()
+            # 如果订单未指定用途，默认为做市订单
+            if "order_purpose" not in order_data:
+                order_data["order_purpose"] = "market_making"
 
         # === 2. 识别超范围订单 ===
         out_of_range_orders = self._find_out_of_range_orders(
@@ -308,6 +311,7 @@ class OrderExecutor:
             "price": anti_pin_price_sell,
             "quantity": anti_pin_amount_sell,
             "quoteQty": None,
+            "order_purpose": "anti_pin",  # 标记为反针对订单
         }
         anti_pin_orders.append(sell_order_data)
         self.current_anti_pin_order_ids.append(sell_client_order_id)
@@ -324,6 +328,7 @@ class OrderExecutor:
             "price": anti_pin_price_buy,
             "quantity": anti_pin_amount_buy,
             "quoteQty": None,
+            "order_purpose": "anti_pin",  # 标记为反针对订单
         }
         anti_pin_orders.append(buy_order_data)
         self.current_anti_pin_order_ids.append(buy_client_order_id)
@@ -352,6 +357,7 @@ class OrderExecutor:
 
         for batch in chunked_orders:
             try:
+                # 每个订单自带order_purpose字段，无需在这里统一指定
                 res = self.order_manager.add_orders_batch(batch, batch_id=None)
                 if res:
                     total_success += len(batch)

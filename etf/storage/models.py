@@ -48,7 +48,14 @@ class Order(Base):
 
     # 策略相关
     strategy_name = Column(String(20), index=True)  # stg3l/stg3s/stg5l/stg5s
-    is_wash_trading = Column(Boolean, default=False, index=True)
+    
+    # 订单用途分类（统一字段，替代is_wash_trading）
+    order_purpose = Column(
+        String(20), 
+        default="market_making",
+        nullable=False,
+        index=True
+    )  # market_making / anti_pin / wash_trading / hedging
 
     # 市场状态（下单时）
     net_value = Column(Numeric(20, 8))
@@ -67,7 +74,8 @@ class Order(Base):
     # 索引
     __table_args__ = (
         Index("idx_symbol_created", "symbol", "created_at"),
-        Index("idx_strategy_wash", "strategy_name", "is_wash_trading"),
+        Index("idx_strategy_purpose", "strategy_name", "order_purpose"),
+        Index("idx_purpose_created", "order_purpose", "created_at"),
     )
 
 
@@ -99,7 +107,14 @@ class Trade(Base):
 
     # 策略相关
     strategy_name = Column(String(20), index=True)
-    is_wash_trading = Column(Boolean, default=False, index=True)
+    
+    # 交易用途分类（统一字段，替代is_wash_trading）
+    trade_purpose = Column(
+        String(20), 
+        default="market_making",
+        nullable=False,
+        index=True
+    )  # market_making / anti_pin / wash_trading / hedging
 
     # 时间戳
     traded_at = Column(DateTime, nullable=False, index=True)

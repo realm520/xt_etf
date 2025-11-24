@@ -134,7 +134,13 @@ class XTWebSocketClient:
             self._loop.close()
 
     async def _connect_and_subscribe(self):
-        """连接WebSocket并订阅数据"""
+        """连接WebSocket并订阅数据
+        
+        增强特性:
+        - 区分正常停止和异常断开
+        - 正常停止时不触发重连
+        - CancelledError正确传播
+        """
         while self._running:
             try:
                 # Public WebSocket 不需要 listenKey
@@ -158,17 +164,41 @@ class XTWebSocketClient:
 
                     # 接收消息循环
                     await self._message_loop()
+            
+            except asyncio.CancelledError:
+                # 任务被取消（stop()调用），正常退出，不重连
+                logger.info("连接任务被取消，停止运行")
+                self._connected = False
+                self._running = False
+                break
+
+            except websockets.exceptions.ConnectionClosedOK:
+                # WebSocket正常关闭
+                logger.info("WebSocket正常关闭")
+                self._connected = False
+                if self._running:
+                    await self._handle_reconnect()
+                else:
+                    break
 
             except websockets.exceptions.ConnectionClosed as e:
+                # WebSocket异常关闭
                 logger.warning(f"WebSocket连接关闭: {e}")
                 self._connected = False
-                await self._handle_reconnect()
+                if self._running:
+                    await self._handle_reconnect()
+                else:
+                    break
 
             except Exception as e:
+                # 其他未预期的异常
                 logger.error(f"WebSocket异常: {e}", exc_info=True)
                 self._stats['errors'] += 1
                 self._connected = False
-                await self._handle_reconnect()
+                if self._running:
+                    await self._handle_reconnect()
+                else:
+                    break
 
     async def _subscribe_depth(self):
         """订阅深度数据（XT官方格式：depth@symbol,levels）"""
@@ -182,19 +212,47 @@ class XTWebSocketClient:
         logger.info(f"已订阅深度数据: depth@{self.symbol},{self.depth_levels}")
 
     async def _message_loop(self):
-        """消息接收循环"""
-        async for message in self._ws:
-            if not self._running:
-                break
+        """消息接收循环
+        
+        增强特性:
+        - 捕获CancelledError避免误触发重连
+        - 持续监听直到明确停止或连接异常
+        - 正确处理WebSocket关闭状态
+        """
+        try:
+            async for message in self._ws:
+                if not self._running:
+                    logger.info("收到停止信号，退出消息循环")
+                    break
 
-            try:
-                self._process_message(message)
-                self._stats['messages_received'] += 1
-                self._stats['last_message_time'] = datetime.now()
+                try:
+                    self._process_message(message)
+                    self._stats['messages_received'] += 1
+                    self._stats['last_message_time'] = datetime.now()
 
-            except Exception as e:
-                logger.error(f"处理消息失败: {e}", exc_info=True)
-                self._stats['errors'] += 1
+                except Exception as e:
+                    logger.error(f"处理消息失败: {e}", exc_info=True)
+                    self._stats['errors'] += 1
+        
+        except asyncio.CancelledError:
+            # 任务被取消，这是正常的停止流程，不触发重连
+            logger.info("消息循环被取消（正常停止）")
+            raise  # 重新抛出，让上层处理
+        
+        except websockets.exceptions.ConnectionClosedOK:
+            # WebSocket正常关闭，记录但不报错
+            logger.info("WebSocket正常关闭")
+        
+        except websockets.exceptions.ConnectionClosedError as e:
+            # WebSocket异常关闭，交给上层重连逻辑处理
+            logger.warning(f"WebSocket连接异常关闭: {e}")
+            raise  # 重新抛出，触发重连
+        
+        except Exception as e:
+            # 未预期的异常，记录详细信息
+            logger.error(f"消息循环异常: {e}", exc_info=True)
+            self._stats['errors'] += 1
+            raise  # 重新抛出，触发重连
 
     def _process_message(self, message: str):
         """处理WebSocket消息（XT官方协议）"""
@@ -222,40 +280,13 @@ class XTWebSocketClient:
             logger.error(f"JSON解析失败: {e}")
 
     def _update_depth_cache(self, depth_data: Dict[str, Any]):
-        """更新深度数据缓存（线程安全）
+        """更新深度数据缓存（线程安全）- 已禁用
 
-        Args:
-            depth_data: XT官方depth推送格式
-                {
-                  "s": "btc_usdt",
-                  "i": 1657699200000,      // 时间戳
-                  "a": [["34000", "1.2"]], // asks（已是字符串格式）
-                  "b": [["32000", "0.2"]]  // bids（已是字符串格式）
-                }
+        注意：根据业务需求，已不再监控订单簿深度数据。
+        该方法保留用于兼容性，但不再处理数据。
         """
-        try:
-            # 转换为REST API兼容格式
-            formatted_data = {
-                "bids": depth_data.get('b', []),  # 官方已是 [["price", "qty"], ...] 格式
-                "asks": depth_data.get('a', []),  # 无需转换
-                "timestamp": depth_data.get('i', int(time.time() * 1000)),  # 'i' 不是 't'
-                "symbol": depth_data.get('s', self.symbol)
-            }
-
-            with self._cache_lock:
-                self._depth_cache = formatted_data
-                self._cache_timestamp = time.time()
-
-            self._stats['depth_updates'] += 1
-
-            logger.debug(
-                f"深度更新: {formatted_data['symbol']} "
-                f"bids={len(formatted_data['bids'])} "
-                f"asks={len(formatted_data['asks'])}"
-            )
-
-        except Exception as e:
-            logger.error(f"更新深度缓存失败: {e}", exc_info=True)
+        # 不再处理和缓存深度数据
+        pass
 
     async def _handle_reconnect(self):
         """处理重连逻辑"""

@@ -16,24 +16,45 @@ from decimal import Decimal
 def get_mid_price(depth: Dict[str, Any]) -> float:
     """
     从订单簿计算中间价格
-    
+
     Args:
         depth: 订单簿深度数据，包含bids和asks
-        
+
     Returns:
         float: 中间价格
-        
+
     Raises:
-        IndexError: 当订单簿为空时
+        IndexError: 当订单簿完全为空时
         ValueError: 当价格格式无效时
+
+    Note:
+        如果只有一边有数据（流动性不足），使用该边的最佳价格作为中间价格
     """
-    if not depth.get("bids") or not depth.get("asks"):
-        raise IndexError("Empty order book")
-    
+    bids = depth.get("bids", [])
+    asks = depth.get("asks", [])
+
+    # ✅ 如果两边都为空，抛出异常
+    if not bids and not asks:
+        raise IndexError("Empty order book (both bids and asks are empty)")
+
     try:
-        best_bid = float(depth["bids"][0][0])
-        best_ask = float(depth["asks"][0][0])
+        # ✅ 如果只有asks（买单为空），使用最佳卖价
+        if not bids and asks:
+            best_ask = float(asks[0][0])
+            logging.warning(f"⚠️ 订单簿只有卖单，使用最佳卖价作为中间价: {best_ask}")
+            return best_ask
+
+        # ✅ 如果只有bids（卖单为空），使用最佳买价
+        if bids and not asks:
+            best_bid = float(bids[0][0])
+            logging.warning(f"⚠️ 订单簿只有买单，使用最佳买价作为中间价: {best_bid}")
+            return best_bid
+
+        # ✅ 正常情况：两边都有数据，计算中间价
+        best_bid = float(bids[0][0])
+        best_ask = float(asks[0][0])
         return (best_bid + best_ask) / 2
+
     except (IndexError, ValueError) as e:
         logging.error(f"Failed to calculate mid price: {e}")
         raise

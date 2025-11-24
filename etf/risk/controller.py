@@ -30,6 +30,10 @@ class RiskController:
         # WebSocket客户端（用于实时depth数据）
         self.ws_client = ws_client
         self.use_websocket = ws_client is not None
+        
+        # 深度数据缓存（用于空订单簿降级）
+        self._last_valid_depth = None
+        self._last_valid_time = 0
 
         if self.use_websocket:
             logging.info(f"RiskController将使用WebSocket获取depth数据")
@@ -111,30 +115,16 @@ class RiskController:
 
     def get_depth_data(self, symbol):
         """
-        获取深度数据
-        优先从WebSocket缓存读取，如果不可用则fallback到REST API
-
+        获取深度数据（已废弃，保留用于兼容性）
+        
+        注意：该方法已不再使用，风险监控不再依赖订单簿深度。
+        保留仅为向后兼容，避免破坏现有代码。
+        
         Returns:
-            深度数据字典
+            None: 始终返回None
         """
-        # 优先使用WebSocket数据
-        if self.use_websocket and self.ws_client:
-            ws_depth = self.ws_client.get_cached_depth(max_age=5)
-            if ws_depth:
-                logging.debug(f"使用WebSocket depth数据: {len(ws_depth.get('bids', []))} bids, {len(ws_depth.get('asks', []))} asks")
-                self.depth = ws_depth
-                return ws_depth
-            else:
-                logging.warning("WebSocket depth数据不可用，fallback到REST API")
-
-        # Fallback到REST API
-        depth = self.client.get_depth(symbol)
-        logging.debug(f"使用REST API depth数据: {depth}")
-        '''
-        {'symbol': 'btc5l_usdt', 'timestamp': 1736170681790, 'lastUpdateId': 1736148981744, 'bids': [['0.8822', '0.8896'], ['0.8813', '10.0000'], ['0.7983', '2.0000'], ['0.7975', '11.0000'], ['0.7223', '3.0000'], ['0.7216', '12.0000'], ['0.6536', '3.0000'], ['0.6529', '13.0000'], ['0.5914', '6.0000'], ['0.5908', '12.0000'], ['0.5351', '4.0000'], ['0.5346', '16.0000'], ['0.4842', '44.0000'], ['0.4381', '4.0000'], ['0.4377', '20.0000'], ['0.3964', '5.0000'], ['0.3960', '22.0000'], ['0.3587', '60.0000'], ['0.3245', '6.0000'], ['0.3242', '27.0000'], ['0.2937', '74.0000'], ['0.2657', '80.0000'], ['0.2404', '9.0000'], ['0.2402', '36.0000'], ['0.2176', '49.0000'], ['0.1968', '108.0000'], ['0.1781', '120.0000'], ['0.1612', '134.0000'], ['0.1458', '28.0000'], ['0.1457', '46.0000'], ['0.1320', '81.0000'], ['0.1194', '180.0000'], ['0.1080', '198.0000'], ['0.0978', '220.0000'], ['0.0884', '242.0000'], ['0.0800', '268.0000'], ['0.0724', '296.0000'], ['0.0655', '328.0000'], ['0.0593', '543.0000'], ['0.0536', '600.0000'], ['0.0485', '221.0000']], 'asks': [['1.1328', '18.0000'], ['1.2519', '20.0000'], ['1.3836', '22.0000'], ['1.5291', '24.0000'], ['1.6899', '26.0000'], ['1.8677', '30.0000'], ['2.0641', '32.0000'], ['2.2812', '36.0000'], ['2.5211', '40.0000'], ['2.7862', '44.0000'], ['3.0792', '48.0000'], ['3.4031', '54.0000'], ['3.7610', '58.0000'], ['4.1566', '64.0000'], ['4.5937', '72.0000'], ['5.0768', '80.0000'], ['5.6108', '88.0000'], ['6.2008', '96.0000'], ['6.8530', '106.0000'], ['7.5737', '118.0000'], ['8.3703', '130.0000'], ['9.2506', '144.0000'], ['10.2235', '160.0000'], ['11.2987', '176.0000'], ['12.4870', '194.0000'], ['13.8002', '216.0000'], ['15.2516', '238.0000'], ['16.8557', '264.0000'], ['18.6284', '290.0000'], ['20.5875', '322.0000']]}
-        '''
-        self.depth = depth
-        return depth
+        logging.debug(f"get_depth_data 已废弃，不再获取订单簿数据: {symbol}")
+        return None
     
     def calculate_volatility(self, close_prices: List[float]) -> float:
         """
@@ -195,30 +185,8 @@ class RiskController:
         else:
             return 3
 
-    def monitor_order_book_depth(self, depth_data):
-        """
-        监测订单簿异常波动。
-        
-        参数：
-            depth_data (list of dict): 每个挂单的数据，包括 'bid' 和 'ask' 的价格和数量。
-            threshold (float): 挂单量减少的阈值比例（例如 0.2 表示减少 80% 即异常）。
-            
-        返回：
-            str: 异常侧信息或正常状态。
-        """
-        # 计算买单（bid）和卖单（ask）的总挂单量
-        bid_volume = sum([float(order[1]) for order in depth_data["bids"]])
-        ask_volume = sum([float(order[1]) for order in depth_data["asks"]])
-
-        # 检查挂单量是否异常减少
-        thresholds = self.risk_params['orderbook_threshold']
-        base_bid_volume = self.risk_params['base_bid_volume']
-        base_ask_volume = self.risk_params['base_ask_volume']
-
-        for level, threshold in enumerate(thresholds, start=1):
-            if bid_volume < base_bid_volume * threshold or ask_volume < base_ask_volume * threshold:
-                return 4 - level
-        return 3
+    # monitor_order_book_depth 方法已移除
+    # 不再监控订单簿深度，风险等级计算已简化
         
     def market_price_deviation(self, market_price, mid_price) -> List[Dict]:
         """
@@ -258,53 +226,69 @@ class RiskController:
     # @staticmethod
     def risk_monitor(self, symbol: str, depth_data: Optional[Dict] = None):
         """
-        Monitors risk levels in real-time.
-        :param symbol: The trading pair (e.g., 'BTCUSDT').
-        :param depth_data: Optional pre-fetched depth data to avoid duplicate API calls
-        :return: The current risk level.
+        实时监控风险等级（简化版，不再依赖订单簿深度）
+        
+        风险因素权重：
+        - 市场波动性: 50%
+        - 中间价偏离: 30%
+        - 市场价偏离: 20%
+        
+        :param symbol: 交易对 (例如 'BTCUSDT')
+        :param depth_data: 可选的预获取深度数据（已废弃，保留兼容性）
+        :return: 当前风险等级
         """
         try:
-            # 如果没有传入depth数据，则获取
-            if depth_data is None:
-                depth_data = self.get_depth_data(symbol)
-            else:
-                logging.debug("使用传入的depth数据，避免重复API调用")
-
-            # 检查订单簿是否为空
-            if not depth_data.get("bids") or not depth_data.get("asks"):
-                logging.warning(f"订单簿为空: {symbol}, 使用保守风险等级 3")
-                self.risk_level = 3  # 保守策略：空订单簿使用最高风险等级
-                return
-
-            mid_price = self.get_mid_price_from_depth(depth_data)
+            # 获取市场价格（从ticker）
             market_price = self.get_market_price(symbol)
-
+            
             # 处理 market_price 为 None 的情况
             if market_price is None:
                 logging.warning(f"无法获取有效市场价格，使用保守风险等级 3")
                 self.risk_level = 3
                 return
-
+            
+            # 计算各项风险因素
             vol_level = self.check_market_volatility(symbol)
-            market_price_level = self.market_price_deviation(market_price, mid_price)
-            mid_price_level = self.mid_price_deviation(mid_price)
-            amount_level = self.monitor_order_book_depth(depth_data)
-
-            logging.info(f"vol_level:{vol_level}, mid_price_level:{mid_price_level}, market_price_level:{market_price_level}, amount_level:{amount_level}")
-            level = vol_level * 0.4 + mid_price_level * 0.3 + market_price_level * 0.2 + amount_level * 0.1
-
+            
+            # 使用市场价格的历史数据计算偏离
+            self.midprices.append(market_price)
+            if len(self.midprices) > 60:
+                self.midprices.pop(0)
+            
+            mean_price = np.mean(self.midprices)
+            std_dev = np.std(self.midprices)
+            
+            # 价格偏离等级
+            if std_dev > 0:
+                if not mean_price - 1 * std_dev <= market_price <= mean_price + 1 * std_dev:
+                    price_deviation_level = 3
+                elif not mean_price - 2 * std_dev <= market_price <= mean_price + 2 * std_dev:
+                    price_deviation_level = 2
+                else:
+                    price_deviation_level = 1
+            else:
+                price_deviation_level = 1
+            
+            logging.info(
+                f"风险因素: vol_level={vol_level}, "
+                f"price_deviation_level={price_deviation_level}"
+            )
+            
+            # 简化的风险等级计算（移除订单簿深度因素）
+            # 波动性50% + 价格偏离50%
+            level = vol_level * 0.5 + price_deviation_level * 0.5
+            
             if level < 1.5:
                 self.risk_level = 1
             elif level < 2.5:
                 self.risk_level = 2
             else:
                 self.risk_level = 3
-
-        except IndexError as e:
-            logging.warning(f"风险监控计算失败（订单簿问题）: {e}, 使用默认风险等级 3")
-            self.risk_level = 3
+            
+            logging.info(f"综合风险等级: {self.risk_level} (score={level:.2f})")
+            
         except Exception as e:
-            logging.error(f"风险监控出现异常: {e}, 使用默认风险等级 3")
+            logging.error(f"风险监控出现异常: {e}, 使用默认风险等级 3", exc_info=True)
             self.risk_level = 3
             
     def update_position_for_stop_loss(
