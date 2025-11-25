@@ -262,7 +262,7 @@ class EtfStrategy:
 
                             # 执行止损操作：撤销所有订单
                             logging.warning("执行止损: 撤销所有挂单")
-                            order_manager.cancel_all_open_orders(config["symbol"])
+                            market_maker.order_manager.cancel_all_open_orders(config["symbol"])
 
                             # 暂停交易一段时间（冷却期）
                             cooldown_time = risk_controller.stop_loss_manager.cooldown_minutes * 60
@@ -274,7 +274,7 @@ class EtfStrategy:
                         logging.error(f"止损检查失败: {e}")
 
                 # ✅ 风险等级检查：根据风险等级决定是否继续交易
-                if not order_manager.risk_actions(risk_controller.risk_level, symbol=config["symbol"]):
+                if not market_maker.order_manager.risk_actions(risk_controller.risk_level, symbol=config["symbol"]):
                     logging.warning(f"风险等级 {risk_controller.risk_level} 过高，暂停市场做市")
                     continue
 
