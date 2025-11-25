@@ -492,7 +492,8 @@ def log_shutdown(strategy_name: str, config: dict, reason: str = "正常退出")
     logging.info("=" * 70)
 
 
-if __name__ == "__main__":
+def main():
+    """ETF 策略主入口函数，支持 uvx 直接调用"""
     parser = get_parser()
     args = parser.parse_args()
 
@@ -998,3 +999,7 @@ if __name__ == "__main__":
     else:
         logging.error(f"风险等级 {risk_controller.risk_level} 过高，无法启动策略")
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

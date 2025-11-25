@@ -32,6 +32,7 @@ dependencies = [
     "opentelemetry-instrumentation>=0.41b0",
     "matplotlib>=3.7.5",
     "seaborn>=0.13.2",
+    "prometheus-client>=0.17.0",
 ]
 
 [project.optional-dependencies]
@@ -49,12 +50,26 @@ dev = [
     "tox",
 ]
 
+[project.scripts]
+# 主命令 - 通过 --strategy 参数指定策略
+etf-run = "run_etf:main"
+
+# 便捷命令 - 直接运行指定策略（自动注入 --strategy 参数）
+etf-stg3l = "etf.cli:run_stg3l"
+etf-stg3s = "etf.cli:run_stg3s"
+etf-stg5l = "etf.cli:run_stg5l"
+etf-stg5s = "etf.cli:run_stg5s"
+etf-ton3l = "etf.cli:run_ton3l"
+
 [build-system]
 requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+include = ["etf*", "binance*"]
+
 [tool.setuptools]
-packages = ["etf", "binance"]
+py-modules = ["run_etf", "run_net_value", "hedging"]
 
 [tool.setuptools.package-data]
 etf = ["*.yaml", "*.json"]
