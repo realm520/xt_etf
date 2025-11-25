@@ -63,7 +63,9 @@ class MarketMaker:
         self.last_netvalue: Optional[float] = None  # 上次净值
         self.last_best_sell: float = 0.0  # 上次最优卖价
         self.last_best_buy: float = 0.0  # 上次最优买价
-        self.price_change_threshold: float = 0.0005  # 价格变化阈值（0.05%）
+        self.price_change_threshold: float = 0.003  # 价格变化阈值（0.3%） - 减少不必要的订单更新
+        self.last_update_time: float = 0.0  # 上次更新时间（时间戳）
+        self.min_update_interval: float = 30.0  # 最小更新间隔（秒）
         
         # ✅ 订单执行器（每个交易对创建一个独立实例）
         self.executor: Optional[OrderExecutor] = None  # 价格变化阈值（0.05%）
@@ -158,6 +160,8 @@ class MarketMaker:
             currencies: 货币列表（已弃用参数）
             prec: 价格精度位数
         """
+        logging.info(f"📥 place_orders 开始: symbol={symbol}")
+        
         # === 1. 获取净值 ===
         try:
             redis_value = self.r.get(config["netvalue"])
@@ -191,29 +195,50 @@ class MarketMaker:
             return
 
         # === 2. 检测价格变化（避免频繁更新）===
+        import time as time_module
+        current_time = time_module.time()
         price_changed = False
+        
+        # 检查是否首次运行
         if self.last_netvalue is None:
             price_changed = True
             logging.info(f"首次运行，初始化净值: {netvalue}")
         else:
+            # 计算价格变化率
             change_rate = abs(netvalue - self.last_netvalue) / self.last_netvalue
+            
+            # 检查时间间隔（防止过于频繁更新）
+            time_since_last_update = current_time - self.last_update_time
+            
             if change_rate >= self.price_change_threshold:
-                price_changed = True
-                logging.info(
-                    f"价格变化 {change_rate:.4%} 超过阈值 {self.price_change_threshold:.4%}，"
-                    f"更新订单簿 (旧: {self.last_netvalue:.6f} → 新: {netvalue:.6f})"
-                )
+                # 价格变化超过阈值，但需要检查时间间隔
+                if time_since_last_update >= self.min_update_interval:
+                    price_changed = True
+                    logging.info(
+                        f"价格变化 {change_rate:.4%} 超过阈值 {self.price_change_threshold:.4%}，"
+                        f"且距上次更新 {time_since_last_update:.1f}秒 >= {self.min_update_interval}秒，"
+                        f"更新订单簿 (旧: {self.last_netvalue:.6f} → 新: {netvalue:.6f})"
+                    )
+                else:
+                    logging.debug(
+                        f"价格变化 {change_rate:.4%} 超过阈值，但距上次更新仅 {time_since_last_update:.1f}秒 "
+                        f"< {self.min_update_interval}秒，跳过订单更新（冷却期保护）"
+                    )
+                    # 更新净值但不重新下单
+                    self.order_manager.netvalue = netvalue
+                    return
             else:
                 logging.debug(
-                    f"价格变化 {change_rate:.4%} 小于阈值，跳过订单更新 "
+                    f"价格变化 {change_rate:.4%} 小于阈值 {self.price_change_threshold:.4%}，跳过订单更新 "
                     f"(当前: {netvalue:.6f}, 上次: {self.last_netvalue:.6f})"
                 )
                 # 价格变化不大，仅更新净值但不重新下单
                 self.order_manager.netvalue = netvalue
                 return
 
-        # 记录新净值
+        # 记录新净值和更新时间
         self.last_netvalue = netvalue
+        self.last_update_time = current_time
         self.order_manager.netvalue = netvalue
         logging.info(f"{symbol}, netvalue={netvalue}")
 
@@ -243,17 +268,49 @@ class MarketMaker:
         # 从配置读取参数
         orderbook_config_dict = config.get("orderbook_config", {})
 
-        # 创建订单簿配置
-        orderbook_cfg = OrderbookConfig(
-            total_budget=orderbook_config_dict.get("total_budget", 10000.0),
-            layer=orderbook_config_dict.get("layer", 500),
-            mid_price=netvalue,
-            bid_ask_spread=config["bid_ask_spread"],
-            symbol=symbol,
-            price_precision=orderbook_config_dict.get("price_precision", config.get("precision", 6)),
-            quantity_precision=orderbook_config_dict.get("quantity_precision", config.get("prec_amount", 2)),
-            extra_params=orderbook_config_dict.get("extra_params", {}),
-        )
+        # 创建订单簿配置（根据算法类型选择配置类）
+        base_config_params = {
+            "total_budget": orderbook_config_dict.get("total_budget", 10000.0),
+            "layer": orderbook_config_dict.get("layer", 500),
+            "mid_price": netvalue,
+            "bid_ask_spread": config["bid_ask_spread"],
+            "symbol": symbol,
+            "price_precision": orderbook_config_dict.get("price_precision", config.get("precision", 6)),
+            "quantity_precision": orderbook_config_dict.get("quantity_precision", config.get("prec_amount", 2)),
+        }
+
+        if orderbook_algorithm == "layered":
+            # 使用分层订单簿配置
+            from etf.orderbook.layered import LayeredOrderbookConfig, LayerConfig
+
+            def parse_layer_config(layer_dict: dict) -> LayerConfig:
+                """解析单层配置"""
+                return LayerConfig(
+                    distance_threshold=layer_dict.get("distance_threshold"),
+                    distance_range=tuple(layer_dict["distance_range"]) if "distance_range" in layer_dict else None,
+                    layer_count=layer_dict.get("layer_count", 50),
+                    price_tolerance=layer_dict.get("price_tolerance", 0.001),
+                    update_interval=layer_dict.get("update_interval", 30),
+                    price_change_trigger=layer_dict.get("price_change_trigger", 0.002),
+                    budget_ratio=layer_dict.get("budget_ratio", 0.3),
+                )
+
+            # 解析3层配置（如果YAML中有配置则使用，否则使用默认值）
+            layer_configs = {}
+            if "near_book" in orderbook_config_dict:
+                layer_configs["near_book"] = parse_layer_config(orderbook_config_dict["near_book"])
+            if "transition_zone" in orderbook_config_dict:
+                layer_configs["transition_zone"] = parse_layer_config(orderbook_config_dict["transition_zone"])
+            if "far_book" in orderbook_config_dict:
+                layer_configs["far_book"] = parse_layer_config(orderbook_config_dict["far_book"])
+
+            orderbook_cfg = LayeredOrderbookConfig(**base_config_params, **layer_configs)
+        else:
+            # 使用基础配置（natural 等其他算法）
+            orderbook_cfg = OrderbookConfig(
+                **base_config_params,
+                extra_params=orderbook_config_dict.get("extra_params", {}),
+            )
 
         # 创建算法实例并生成订单簿
         algorithm = OrderbookFactory.create(orderbook_algorithm, orderbook_cfg)

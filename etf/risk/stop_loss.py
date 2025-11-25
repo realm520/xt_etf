@@ -179,11 +179,27 @@ class StopLossManager:
     def check_trailing_stop_loss(self, position: PositionInfo) -> Tuple[bool, float]:
         """检查移动止损"""
         if position.side == 'long':
+            # ✅ 防止除零错误：检查最高价是否有效
+            if position.highest_price <= 0:
+                logger.warning(
+                    f"⚠️ 最高价数据异常: symbol={position.symbol}, "
+                    f"highest={position.highest_price:.4f}, 跳过移动止损检查"
+                )
+                return False, 0.0
+            
             # 做多：从最高点回撤
             drawdown = (position.highest_price - position.current_price) / position.highest_price
             if drawdown >= self.trailing_stop:
                 return True, -drawdown
         else:  # short
+            # ✅ 防止除零错误：检查最低价是否有效
+            if position.lowest_price <= 0:
+                logger.warning(
+                    f"⚠️ 最低价数据异常: symbol={position.symbol}, "
+                    f"lowest={position.lowest_price:.4f}, 跳过移动止损检查"
+                )
+                return False, 0.0
+            
             # 做空：从最低点反弹
             bounce = (position.current_price - position.lowest_price) / position.lowest_price
             if bounce >= self.trailing_stop:

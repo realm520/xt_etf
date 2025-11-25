@@ -92,8 +92,8 @@ def setup_logging(
         console_handler.setLevel(logging.INFO)  # 控制台只显示 INFO 及以上
 
         console_format = ColoredFormatter(
-            fmt="%(levelname)-8s | %(filename)s:%(lineno)d | %(message)s",
-            datefmt="%H:%M:%S"
+            fmt="%(asctime)s | %(levelname)-8s | %(filename)s:%(lineno)d | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
         )
         console_handler.setFormatter(console_format)
         logger.addHandler(console_handler)

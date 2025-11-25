@@ -135,11 +135,12 @@ class XTWebSocketClient:
 
     async def _connect_and_subscribe(self):
         """连接WebSocket并订阅数据
-        
+
         增强特性:
         - 区分正常停止和异常断开
         - 正常停止时不触发重连
         - CancelledError正确传播
+        - XT自定义心跳机制（字符串"ping"/"pong"）
         """
         while self._running:
             try:
@@ -148,10 +149,11 @@ class XTWebSocketClient:
 
                 logger.info(f"正在连接WebSocket: {url}")
 
+                # 禁用websockets库的自动ping（XT使用自定义字符串心跳）
                 async with websockets.connect(
                     url,
-                    ping_interval=self.ping_interval,
-                    ping_timeout=self.ping_timeout
+                    ping_interval=None,  # 禁用自动ping
+                    ping_timeout=None    # 禁用ping超时检测
                 ) as ws:
                     self._ws = ws
                     self._connected = True
@@ -162,8 +164,19 @@ class XTWebSocketClient:
                     # 订阅深度数据
                     await self._subscribe_depth()
 
-                    # 接收消息循环
-                    await self._message_loop()
+                    # 启动心跳任务（XT使用字符串"ping"）
+                    heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+                    try:
+                        # 接收消息循环
+                        await self._message_loop()
+                    finally:
+                        # 取消心跳任务
+                        heartbeat_task.cancel()
+                        try:
+                            await heartbeat_task
+                        except asyncio.CancelledError:
+                            pass
             
             except asyncio.CancelledError:
                 # 任务被取消（stop()调用），正常退出，不重连
@@ -211,6 +224,26 @@ class XTWebSocketClient:
         await self._ws.send(json.dumps(subscribe_msg))
         logger.info(f"已订阅深度数据: depth@{self.symbol},{self.depth_levels}")
 
+    async def _heartbeat_loop(self):
+        """XT自定义心跳循环（发送字符串"ping"，接收"pong"）"""
+        try:
+            while self._running and self._connected:
+                await asyncio.sleep(self.ping_interval)
+
+                if not self._ws or not self._connected:
+                    break
+
+                try:
+                    # XT使用字符串"ping"作为心跳
+                    await self._ws.send("ping")
+                    logger.debug("发送心跳: ping")
+                except Exception as e:
+                    logger.warning(f"心跳发送失败: {e}")
+                    break
+        except asyncio.CancelledError:
+            logger.debug("心跳任务被取消")
+            raise
+
     async def _message_loop(self):
         """消息接收循环
         
@@ -256,6 +289,11 @@ class XTWebSocketClient:
 
     def _process_message(self, message: str):
         """处理WebSocket消息（XT官方协议）"""
+        # 处理心跳响应（字符串"pong"）
+        if message == "pong":
+            logger.debug("收到心跳响应: pong")
+            return
+
         try:
             data = json.loads(message)
 

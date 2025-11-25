@@ -20,6 +20,7 @@ import yaml
 import os
 import asyncio
 import sys
+import redis
 
 # 暂时使用基础配置，等策略名称确定后会重新配置
 logging.shutdown()
@@ -77,6 +78,71 @@ class EtfStrategy:
         )
         logging.info("finish cancel_all_open_orders")
 
+        # ═══════════════════════════════════════════════════════════
+        # 🚀 初始化阶段：确保做市订单和反针对订单挂好后才启动洗盘逻辑
+        # ═══════════════════════════════════════════════════════════
+        logging.info("=" * 70)
+        logging.info("🚀 开始初始化阶段")
+        logging.info("=" * 70)
+        
+        # 设置初始化标志为 False（通过 Redis 共享给其他线程）
+        strategy_name = config.get("strategy_name", "unknown")
+        r = redis.StrictRedis(host="localhost", port=6379, db=0, decode_responses=True)
+        r.set(f"initialized:{strategy_name}", "false")
+        logging.info(f"✅ 初始化标志已设置为 false (strategy={strategy_name})")
+        
+        try:
+            # Step 1: 挂初始做市订单
+            logging.info("📝 Step 1: 挂初始做市订单...")
+            logging.info(f"   策略: {strategy_name}, 交易对: {config['symbol']}")
+            
+            market_maker.place_orders(
+                config,
+                symbol=config["symbol"],
+                env=config["env"],
+                currencies=config["currencies"],
+                prec=config["precision"],
+            )
+            
+            logging.info("⏳ 等待5秒让订单挂单...")
+            time.sleep(5)
+            logging.info("✅ 初始做市订单下单完成")
+            
+            # Step 2: 验证订单挂单状态
+            logging.info("📝 Step 2: 验证订单挂单状态...")
+            
+            # 获取最新订单状态
+            market_maker.order_manager.reset_open_orders(config["symbol"])
+            open_orders = market_maker.order_manager.open_orders  # 直接访问属性
+            
+            if open_orders and len(open_orders) > 0:
+                logging.info(f"✅ 当前活跃订单数: {len(open_orders)}")
+                # 显示前5个订单ID示例
+                sample_order_ids = list(open_orders.keys())[:5]
+                logging.info(f"   - 示例订单ID: {sample_order_ids}")
+                
+                # 统计买卖订单数量
+                buy_count = sum(1 for order in open_orders.values() if order.get('side') == 'BUY')
+                sell_count = sum(1 for order in open_orders.values() if order.get('side') == 'SELL')
+                logging.info(f"   - 买单: {buy_count}, 卖单: {sell_count}")
+            else:
+                logging.warning("⚠️ 未检测到活跃订单")
+                logging.warning("   可能原因: 1) 订单被秒成交 2) API延迟 3) 网络问题")
+                logging.warning("   系统将继续初始化，但建议检查订单状态")
+            
+            # Step 3: 设置初始化完成标志
+            logging.info("📝 Step 3: 设置初始化完成标志...")
+            r.set(f"initialized:{strategy_name}", "true")
+            logging.info("✅ 初始化完成！洗盘逻辑现在可以启动")
+            
+        except Exception as e:
+            logging.error(f"❌ 初始化阶段失败: {e}")
+            logging.warning("继续运行主循环，但洗盘逻辑将等待初始化完成")
+            r.set(f"initialized:{strategy_name}", "false")
+        
+        logging.info("=" * 70)
+        logging.info("🎯 进入主循环")
+        logging.info("=" * 70)
 
         while True:
             try:
@@ -104,13 +170,9 @@ class EtfStrategy:
                         # 保持当前风险等级，继续运行
 
                 # ✅ 持仓信息更新（用于止损计算）
+                # 注意：get_position3使用REST API获取价格，不依赖depth数据
                 if risk_controller.stop_loss_manager and config.get("currencies"):
                     try:
-                        # 检查订单簿是否可用
-                        if not depth or not depth.get('bids') or not depth.get('asks'):
-                            logging.debug("⏭️ 订单簿为空，跳过本次止损更新")
-                            continue
-                        
                         # 获取当前持仓信息
                         delta_pos, position, mid_price, delta_amt = order_manager.get_position3(
                             config["symbol"], config["currencies"]
@@ -377,7 +439,7 @@ def get_parser():
         "--hedging-interval", type=int, default=20, help="Hedging interval in seconds."
     )
     parser.add_argument(
-        "--washing-interval", type=int, default=1, help="Washing interval in seconds."
+        "--washing-lambda", type=int, default=15, help="Washing base interval in seconds (default: 15)."
     )
     parser.add_argument(
         "--kline-continuity-interval",
@@ -487,9 +549,9 @@ if __name__ == "__main__":
         "Hedging_interval": args.hedging_interval
         if args.hedging_interval != parser.get_default("hedging_interval")
         else strategy_config.get("Hedging_interval", args.hedging_interval),
-        "washing_interval": args.washing_interval
-        if args.washing_interval != parser.get_default("washing_interval")
-        else strategy_config.get("washing_interval", args.washing_interval),
+        "washing_lambda": args.washing_lambda
+        if args.washing_lambda != parser.get_default("washing_lambda")
+        else strategy_config.get("washing_lambda", args.washing_lambda),
         "kline_continuity_interval": args.kline_continuity_interval
         if args.kline_continuity_interval
         != parser.get_default("kline_continuity_interval")
@@ -779,8 +841,8 @@ if __name__ == "__main__":
 
     # market maker related
     # 传递策略名称和Symbol配置管理器给 OrderManager
-    # 从配置中读取订单档位数量（layer），默认500
-    tier = config.get("orderbook_config", {}).get("layer", 500)
+    # 从配置中读取订单档位数量（layer），默认200（避免ORDER_006挂单过多错误）
+    tier = config.get("orderbook_config", {}).get("layer", 200)
     order_manager = OrderManager(spot, strategy_name=strategy_name, symbol_config=symbol_config_manager, tier=tier)
     
     # 启用资金检查（如果配置中启用）
@@ -810,6 +872,34 @@ if __name__ == "__main__":
     def cleanup():
         """清理函数，在程序退出时执行"""
         try:
+            logging.info("=" * 70)
+            logging.info("🛑 开始执行程序退出流程")
+            logging.info("=" * 70)
+            
+            # ✅ 步骤1: 停止洗盘交易（优先级最高）
+            if config.get("Enable_wash_trading", False):
+                try:
+                    # 尝试访问 wash_controller（如果已创建）
+                    if 'wash_controller' in dir():
+                        logging.info("🛑 步骤1: 停止洗盘交易控制器...")
+                        success = wash_controller.stop(wait_timeout=60)
+                        if success:
+                            logging.info("✅ 洗盘交易已安全停止")
+                        else:
+                            logging.warning("⚠️ 洗盘交易停止超时，但已设置停止标志")
+                    else:
+                        logging.info("ℹ️ 洗盘交易控制器未创建，跳过停止步骤")
+                except Exception as e:
+                    logging.error(f"停止洗盘交易失败: {e}")
+            
+            # 清理初始化标志
+            try:
+                r = redis.StrictRedis(host="localhost", port=6379, db=0, decode_responses=True)
+                r.delete(f"initialized:{strategy_name}")
+                logging.info(f"✅ 已清理初始化标志: initialized:{strategy_name}")
+            except Exception as e:
+                logging.error(f"清理初始化标志失败: {e}")
+            
             # 停止Symbol配置管理器
             if symbol_config_manager:
                 try:
@@ -829,17 +919,28 @@ if __name__ == "__main__":
             # 停止稳定性监控
             if 'stability_monitor' in locals():
                 stability_monitor.stop_monitoring()
-                logging.info("稳定性监控已停止")
+                logging.info("✅ 稳定性监控已停止")
 
             # 记录停止日志（替代告警）
             log_shutdown(strategy_name, config)
 
-            # 撤销所有挂单
-            try:
-                order_manager.cancel_all_open_orders(config["symbol"])
-                logging.info("已撤销所有挂单")
-            except Exception as e:
-                logging.error(f"撤销挂单失败: {e}")
+            # ✅ 步骤2: 根据环境变量决定是否撤单
+            cancel_on_exit = os.getenv("CANCEL_ORDERS_ON_EXIT", "true").lower() == "true"
+            
+            if cancel_on_exit:
+                logging.info("🛑 步骤2: 撤销所有挂单 (CANCEL_ORDERS_ON_EXIT=true)")
+                try:
+                    order_manager.cancel_all_open_orders(config["symbol"])
+                    logging.info("✅ 已撤销所有挂单")
+                except Exception as e:
+                    logging.error(f"撤销挂单失败: {e}")
+            else:
+                logging.info("ℹ️ 步骤2: 保留所有挂单 (CANCEL_ORDERS_ON_EXIT=false)")
+                logging.info("   做市订单将继续工作，直到手动撤销或被成交")
+
+            logging.info("=" * 70)
+            logging.info("✅ 程序退出流程完成")
+            logging.info("=" * 70)
 
         except Exception as e:
             logging.error(f"清理过程出错: {e}")
@@ -864,6 +965,15 @@ if __name__ == "__main__":
     if order_manager.risk_actions(risk_controller.risk_level, symbol=config["symbol"]):
         market_maker = MarketMaker(order_manager)
         wash_controller = WashController(order_manager, market_maker)
+        
+        # ✅ 初始化洗盘订单追踪器（检测和处理孤儿订单）
+        wash_order_check_interval = config.get("wash_order_check_interval", 5.0)
+        wash_order_max_wait = config.get("wash_order_max_wait", 30.0)
+        wash_controller.init_order_tracker(
+            client=order_manager.client,
+            check_interval=wash_order_check_interval,
+            max_wait_time=wash_order_max_wait
+        )
 
         # 复用之前获取的 depth，避免短时间内重复 API 调用触发限流
         if depth is None:

@@ -496,14 +496,57 @@ class Spot:
 
     def get_batch_orders(self, order_ids: list) -> list:
         """
-        :param market: 交易对
-        :param data:[161889118535516, 161889118535517] 不超过150个 否则可能触发get请求过大
-        :return: 参考get_order 结果为字典数组
+        批量查询订单状态
+        :param order_ids: 订单ID列表，不超过150个
+        :return: 订单字典数组
         """
-        # if
-        params = {'orderIds': ','.join(order_ids)}
-        res = self.req_get("/v4/batch-order", params)
-        return res['result']
+        import logging
+        
+        if not order_ids:
+            logging.warning("get_batch_orders: 订单ID列表为空")
+            return []
+        
+        # 确保所有ID都是字符串
+        order_ids_str = [str(oid) for oid in order_ids]
+        
+        # 限制最大150个订单
+        if len(order_ids_str) > 150:
+            logging.warning(f"get_batch_orders: 订单数量({len(order_ids_str)})超过限制，截断到150")
+            order_ids_str = order_ids_str[:150]
+        
+        params = {'orderIds': ','.join(order_ids_str)}
+        
+        try:
+            logging.debug(f"get_batch_orders: 查询 {len(order_ids_str)} 个订单")
+            logging.debug(f"   参数: {params}")
+            
+            res = self.req_get("/v4/batch-order", params)
+            
+            # 检查响应
+            if not res:
+                logging.error("get_batch_orders: API返回空响应")
+                return []
+            
+            if 'result' not in res:
+                logging.error(f"get_batch_orders: API响应缺少result字段: {res}")
+                return []
+            
+            result = res['result']
+            
+            if result is None:
+                logging.warning("get_batch_orders: result字段为None")
+                return []
+            
+            if not isinstance(result, list):
+                logging.error(f"get_batch_orders: result不是列表: {type(result)}")
+                return []
+            
+            logging.debug(f"get_batch_orders: 成功查询到 {len(result)} 个订单")
+            return result
+            
+        except Exception as e:
+            logging.error(f"get_batch_orders: 查询失败: {e}", exc_info=True)
+            return []
 
     def get_all_orders(self, market: str):
         res = []

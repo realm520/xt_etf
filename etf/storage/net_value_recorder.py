@@ -207,7 +207,6 @@ class NetValueRecorder:
         except Exception as e:
             logger.error(f"NetValueRecorder({self.strategy_name}): 数据库写入失败: {e}")
             # 降级：数据已在Redis，不会丢失
-            # 可以选择将失败的数据写入CSV作为备份
             raise
 
     @retry(

@@ -1,7 +1,6 @@
 import time
 import random
 import logging
-import pandas as pd
 import os
 import json
 import redis
@@ -33,7 +32,7 @@ try:
     ORDER_RECORDER_AVAILABLE = True
 except ImportError:
     ORDER_RECORDER_AVAILABLE = False
-    logging.warning("订单记录器未安装，将只使用CSV记录")
+    logging.warning("订单记录器未安装，订单/成交数据将不会持久化")
 
 # 导入资金检查器
 from etf.balance_checker import BalanceChecker, BalanceStatus
@@ -118,12 +117,12 @@ class Order:
 
 
 class OrderManager:
-    def __init__(self, spot, strategy_name: str = "unknown", symbol_config=None, enable_websocket: bool = False, tier: int = 500):
+    def __init__(self, spot, strategy_name: str = "unknown", symbol_config=None, enable_websocket: bool = False, tier: int = 200):
         self.counter = 0
         self.client = spot
         self.strategy_name = strategy_name  # 添加策略名称
         self.symbol_config = symbol_config  # Symbol配置管理器
-        self.tier = tier  # 订单档位数量（默认500档）
+        self.tier = tier  # 订单档位数量（默认200档，避免ORDER_006挂单过多错误）
         self.last_position = 0
         self.position = 0
         self.amount = 0
@@ -135,9 +134,7 @@ class OrderManager:
         self.delta_usdt = None
         self.netvalue = None
         self.init_amount = None
-        self.open_orders_csv_file = "xt_open_orders.csv"
-        self.trading_history_csv_file = "xt_trading_history.csv"
-        self.history_orders_csv_file = "xt_history_orders.csv"
+
 
         # orders
         self.open_orders = {}
@@ -211,9 +208,10 @@ class OrderManager:
             filled_orders=self.filled_orders,
             canceled_orders=self.canceled_orders,
             order_recorder=self.order_recorder,
+            async_scheduler=self._schedule_async,
             logger=logging.getLogger(f"{__name__}.StateManager")
         )
-        logging.info("OrderStateManager已初始化")
+        logging.info("OrderStateManager已初始化，成交记录已启用")
 
     def _init_recorder_loop(self):
         """初始化后台事件循环用于异步操作"""
@@ -860,9 +858,23 @@ class OrderManager:
                 logging.error(f"交易对: {symbol}, 侧: {side}, 价格: {price}, 数量: {quantity}")
                 return None
 
+        # 生成带前缀的clientOrderId，用于订单类型识别
+        base_id = self.create_temp_id()
+        if order_purpose == "market_making":
+            client_order_id = f"mm_{base_id}"
+        elif order_purpose == "anti_pin":
+            client_order_id = f"antipin_{base_id}"
+        elif order_purpose == "wash_trading":
+            client_order_id = f"wash_{base_id}"
+        elif order_purpose == "hedging":
+            client_order_id = f"hedge_{base_id}"
+        else:
+            client_order_id = base_id
+
         order = Order(
             symbol=symbol, side=side, type=type, price=price, quantity=quantity
         )
+        order.clientOrderId = client_order_id
 
         # 🆕 第一阶段：记录 PENDING 状态到数据库
         pending_order_id = None
@@ -977,6 +989,335 @@ class OrderManager:
                 logging.error(f"记录订单失败: {e}")
 
         return response
+
+    @handle_api_error
+    def place_single_order(
+        self,
+        symbol: str,
+        side: str,
+        price: float,
+        quantity: float,
+        order_purpose: str = "wash_trading",
+        delay_ms: int = 0,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        逐笔下单方法 - 专为洗盘交易设计
+
+        与 add_order 的区别：
+        1. 更简洁的参数签名，适合循环调用
+        2. 支持下单间隔延迟（模拟真实交易节奏）
+        3. 针对洗盘交易优化的日志输出
+        4. 返回统一格式的结果，便于批量处理统计
+
+        Args:
+            symbol: 交易对符号 (如 'TON3LUSDT')
+            side: 交易方向 ('BUY' 或 'SELL')
+            price: 下单价格
+            quantity: 下单数量
+            order_purpose: 订单用途标识，默认 'wash_trading'
+            delay_ms: 下单后延迟毫秒数（0-1000），用于模拟真实交易节奏
+
+        Returns:
+            Dict: 包含以下字段的结果字典
+                - success: bool，是否成功
+                - order_id: str，订单ID（成功时）
+                - error: str，错误信息（失败时）
+                - price: float，实际下单价格
+                - quantity: float，实际下单数量
+                - side: str，交易方向
+            None: 熔断器开启时返回
+
+        Example:
+            >>> result = order_manager.place_single_order(
+            ...     symbol="TON3LUSDT",
+            ...     side="BUY",
+            ...     price=0.7280,
+            ...     quantity=10.5,
+            ...     delay_ms=50
+            ... )
+            >>> if result and result['success']:
+            ...     print(f"订单成功: {result['order_id']}")
+        """
+        # 检查熔断器
+        if not self._check_circuit_breaker():
+            return None
+
+        # 检查黑名单
+        if self.is_symbol_blacklisted(symbol):
+            blacklist_info = self.get_blacklist_info(symbol)
+            logging.warning(
+                f"跳过下单: {symbol} 在黑名单中, "
+                f"原因: {blacklist_info.get('reason')} - {blacklist_info.get('description')}"
+            )
+            return {
+                "success": False,
+                "error": f"symbol_blacklisted:{blacklist_info.get('reason')}",
+                "price": price,
+                "quantity": quantity,
+                "side": side,
+            }
+
+        # 格式化和验证订单参数
+        original_price = price
+        original_quantity = quantity
+
+        if self.symbol_config:
+            price = self.symbol_config.format_price(symbol, price)
+            quantity = self.symbol_config.format_quantity(symbol, quantity)
+
+            # 验证订单
+            is_valid, error_msg = self.symbol_config.validate_order(symbol, price, quantity)
+            if not is_valid:
+                # 尝试自动调整数量（针对金额不足的情况）
+                if "订单金额低于最小值" in error_msg:
+                    min_order_value = self.symbol_config.get_min_order_value(symbol)
+                    if min_order_value and price > 0:
+                        adjusted_quantity = (min_order_value / price) * 1.2
+                        quantity = self.symbol_config.format_quantity(symbol, adjusted_quantity)
+
+                        is_valid_new, error_msg_new = self.symbol_config.validate_order(symbol, price, quantity)
+                        if is_valid_new:
+                            logging.debug(
+                                f"逐笔订单数量自动调整: {original_quantity} → {quantity}"
+                            )
+                        else:
+                            logging.warning(f"逐笔订单验证失败: {error_msg_new}")
+                            return {
+                                "success": False,
+                                "error": error_msg_new,
+                                "price": price,
+                                "quantity": quantity,
+                                "side": side,
+                            }
+                else:
+                    logging.warning(f"逐笔订单验证失败: {error_msg}")
+                    return {
+                        "success": False,
+                        "error": error_msg,
+                        "price": price,
+                        "quantity": quantity,
+                        "side": side,
+                    }
+
+        # 生成带前缀的clientOrderId，用于订单类型识别
+        base_id = self.create_temp_id()
+        if order_purpose == "wash_trading":
+            client_order_id = f"wash_{base_id}"
+        elif order_purpose == "market_making":
+            client_order_id = f"mm_{base_id}"
+        elif order_purpose == "anti_pin":
+            client_order_id = f"antipin_{base_id}"
+        elif order_purpose == "hedging":
+            client_order_id = f"hedge_{base_id}"
+        else:
+            client_order_id = base_id
+
+        # 创建订单对象
+        order = Order(
+            symbol=symbol,
+            side=side,
+            type="LIMIT",
+            price=price,
+            quantity=quantity
+        )
+        order.clientOrderId = client_order_id
+
+        # 发送订单到交易所
+        try:
+            response = self.client.order(
+                symbol=order.symbol,
+                side=order.side,
+                type=order.type,
+                biz_type=order.bizType,
+                time_in_force=order.timeInForce,
+                client_order_id=order.clientOrderId,
+                price=order.price,
+                quantity=order.quantity,
+                quote_qty=order.quoteQty,
+            )
+            self._record_api_success()
+
+            order_id = response.get("orderId", "") if response else ""
+
+            # 记录订单到数据库
+            if response and self.order_recorder:
+                try:
+                    record_data = {
+                        "symbol": symbol,
+                        "order_id": order_id,
+                        "client_order_id": order.clientOrderId,
+                        "side": side,
+                        "order_type": "LIMIT",
+                        "price": float(price),
+                        "quantity": float(quantity),
+                        "status": "NEW",
+                        "strategy_name": self.strategy_name,
+                        "order_purpose": order_purpose,
+                        "net_value": float(self.netvalue) if self.netvalue else None,
+                        "timestamp": datetime.now(timezone.utc),
+                    }
+                    self._schedule_async(self.order_recorder.record_order(record_data))
+                except Exception as e:
+                    logging.debug(f"记录逐笔订单失败: {e}")
+
+            # 下单后延迟（模拟真实交易节奏）
+            if delay_ms > 0:
+                time.sleep(delay_ms / 1000.0)
+
+            logging.debug(
+                f"✅ 逐笔下单成功: {side} {quantity}@{price} | ID={order_id}"
+            )
+
+            return {
+                "success": True,
+                "order_id": order_id,
+                "price": price,
+                "quantity": quantity,
+                "side": side,
+                "response": response,
+            }
+
+        except Exception as e:
+            self._record_api_failure()
+            error_str = str(e)
+
+            # 检查是否为永久性错误
+            error_code = self._extract_error_code(error_str)
+            if error_code and is_permanent_error(error_code):
+                self._add_to_blacklist(symbol, error_code)
+
+            logging.warning(f"❌ 逐笔下单失败: {side} {quantity}@{price} | 错误: {e}")
+
+            return {
+                "success": False,
+                "error": error_str,
+                "price": price,
+                "quantity": quantity,
+                "side": side,
+            }
+
+    def _extract_error_code(self, error_str: str) -> Optional[str]:
+        """
+        从错误信息中提取错误码
+
+        Args:
+            error_str: 错误信息字符串
+
+        Returns:
+            错误码字符串，如 'ORDER_008'，或 None
+        """
+        import re
+        # 匹配类似 ORDER_008, BALANCE_001 等格式的错误码
+        match = re.search(r'([A-Z]+_\d{3})', error_str)
+        if match:
+            return match.group(1)
+        return None
+
+    def place_orders_sequential(
+        self,
+        orders: List[Dict[str, Any]],
+        delay_between_ms: int = 50,
+        stop_on_failure: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        逐笔顺序下单方法 - 批量执行单笔订单
+
+        依次执行多个单笔订单，每笔订单之间可配置延迟，
+        适合需要精确控制执行节奏的洗盘交易场景。
+
+        Args:
+            orders: 订单列表，每个订单包含:
+                - symbol: 交易对
+                - side: 方向
+                - price: 价格
+                - quantity: 数量
+                - order_purpose: 订单用途（可选，默认 'wash_trading'）
+            delay_between_ms: 订单之间的延迟毫秒数，默认50ms
+            stop_on_failure: 遇到失败是否停止，默认False继续执行
+
+        Returns:
+            Dict: 执行结果摘要
+                - total: 总订单数
+                - success_count: 成功数
+                - failed_count: 失败数
+                - results: 每个订单的详细结果列表
+
+        Example:
+            >>> orders = [
+            ...     {"symbol": "TON3LUSDT", "side": "BUY", "price": 0.728, "quantity": 10},
+            ...     {"symbol": "TON3LUSDT", "side": "SELL", "price": 0.728, "quantity": 10},
+            ... ]
+            >>> summary = order_manager.place_orders_sequential(orders, delay_between_ms=100)
+            >>> print(f"成功: {summary['success_count']}/{summary['total']}")
+        """
+        results = []
+        success_count = 0
+        failed_count = 0
+
+        logging.info(f"📤 开始逐笔下单: 共{len(orders)}笔, 间隔{delay_between_ms}ms")
+
+        for i, order in enumerate(orders):
+            symbol = order.get("symbol")
+            side = order.get("side")
+            price = order.get("price")
+            quantity = order.get("quantity")
+            order_purpose = order.get("order_purpose", "wash_trading")
+
+            # 参数验证
+            if not all([symbol, side, price, quantity]):
+                logging.warning(f"订单[{i}]参数不完整，跳过")
+                results.append({
+                    "index": i,
+                    "success": False,
+                    "error": "incomplete_params",
+                })
+                failed_count += 1
+                continue
+
+            # 执行单笔下单
+            result = self.place_single_order(
+                symbol=symbol,
+                side=side,
+                price=price,
+                quantity=quantity,
+                order_purpose=order_purpose,
+                delay_ms=delay_between_ms if i < len(orders) - 1 else 0,  # 最后一笔不延迟
+            )
+
+            if result is None:
+                # 熔断器开启
+                logging.warning(f"订单[{i}]熔断器开启，停止后续下单")
+                results.append({
+                    "index": i,
+                    "success": False,
+                    "error": "circuit_breaker_open",
+                })
+                failed_count += 1
+                break
+
+            result["index"] = i
+            results.append(result)
+
+            if result.get("success"):
+                success_count += 1
+            else:
+                failed_count += 1
+                if stop_on_failure:
+                    logging.warning(f"订单[{i}]失败，停止后续下单")
+                    break
+
+        summary = {
+            "total": len(orders),
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "results": results,
+        }
+
+        logging.info(
+            f"📊 逐笔下单完成: 成功={success_count}, 失败={failed_count}, 总计={len(orders)}"
+        )
+
+        return summary
 
     @handle_api_error
     def add_orders_batch(self, order_data, batch_id=None, order_purpose=None):
@@ -1249,9 +1590,7 @@ class OrderManager:
         return response
 
     def cancel_orders_batch(self, orders):
-        """
-        cancel open orders only from csv files, should remove these orders from csv files
-        """
+        """批量取消订单"""
         time.sleep(0.1)
 
         response = self.client.cancel_orders([order["orderId"] for order in orders])
@@ -1404,96 +1743,6 @@ class OrderManager:
             
             raise
 
-    def write_orders2(self):
-        """
-        write open orders
-        """
-        new_data = [order for order in self.open_orders.values()]
-        df = pd.DataFrame(new_data)
-        logging.info(f"writing {len(df)} open orders in to csv file")
-        # logging.info(f"new open orders length: {len(new_data) - len(local_data)}")
-        # logging.info(f"local open orders length: {len(local_data)}")
-
-        df.to_csv(self.open_orders_csv_file, mode="w", index=False, header=True)
-
-        # reset all datas
-        self.open_orders = {}
-        self.filled_orders = []
-
-    def write_history_orders(self):
-        """
-        【已弃用】历史订单CSV记录功能
-
-        此方法已被弃用，订单数据现在统一通过OrderStateManager和order_recorder
-        持久化到PostgreSQL数据库。保留此方法仅为向后兼容。
-
-        弃用原因：
-        1. CSV与数据库双重记录导致数据不一致
-        2. CSV缺乏事务性和并发安全
-        3. PostgreSQL提供更好的查询和分析能力
-
-        迁移指南：
-        - 订单状态变更会自动记录到数据库
-        - 查询历史订单请使用order_recorder.query_orders()
-        - 如需导出CSV，使用order_recorder的导出功能
-        """
-        logging.warning(
-            "write_history_orders() 已弃用，订单数据自动持久化到PostgreSQL。"
-            "此调用将被忽略。"
-        )
-        return
-        """
-        write history orders to local csv file,
-        1. filled orders
-        2. canceled orders
-        """
-
-        # 1. filled orders
-        # max_batch_size = 100
-        # chunked_get_orders = []
-        # filled_orders = []
-
-        # sent_orders_ids = self.sent_orders.keys()
-        # for t in range(0, len(self.sent_orders), max_batch_size):
-        #     chunked_get_orders.append([order_id for order_id in sent_orders_ids[t: t + max_batch_size]])
-
-        # for chunk in chunked_get_orders:
-        #     response = self.client.get_batch_orders(chunk)
-
-        # if response:
-        #     for res in response:
-        #         if res["state"] == 'FILLED':
-        #             '''
-        #             {'symbol': 'btc5l_usdt', 'orderId': '450207381092125065', 'clientOrderId': '894875718937174804',
-        #             'baseCurrency': 'btc5l', 'quoteCurrency': 'usdt', 'side': 'SELL', 'type': 'LIMIT',
-        #             'timeInForce': 'GTC', 'price': '20.5877', 'origQty': '181.0000', 'origQuoteQty': '3726.3737',
-        #             'executedQty': '0.0000', 'leavingQty': '181.0000', 'tradeBase': '0.0000', 'tradeQuote': '0.0000',
-        #             'avgPrice': None, 'fee': None, 'feeCurrency': None, 'nftId': None, 'symbolType': 'normal',
-        #             'deductServices': [], 'origRestFee': None, 'origFeeCurrency': None, 'platFormCurrencyFee': None,
-        #             'platFormCurrency': None, 'couponAmount': None, 'couponCurrency': None, 'couponDeductFee': None,
-        #             'closed': False, 'state': 'NEW', 'time': 1737039804101, 'updatedTime': None, 'ip': '54.151.166.240'}
-        #             '''
-        #             current_time = time.time()
-        #             filled_orders.append({
-        #                 "symbol":res["symbol"],
-        #                 "side": res["side"],
-        #                 "price": res["price"],
-        #                 "quantity": res["origQty"],
-        #                 "orderId": res["orderId"],
-        #                 "time": current_time,
-        #                 "UTC_PLUS_8": datetime.fromtimestamp(current_time, tz=timezone.utc).astimezone(timezone(timedelta(hours=8))),
-        #                 "state": res["state"],
-        #             })
-
-        # canclled orders
-        new_data = self.filled_orders + self.canceled_orders
-        df = pd.DataFrame(new_data)
-        logging.info(f"writing {len(df)} history orders in to csv file")
-        logging.info(f"filled_orders length: {len(self.filled_orders)}")
-        logging.info(f"canceled_orders length: {len(self.canceled_orders)}")
-
-        df.to_csv(self.history_orders_csv_file, mode="a", index=False, header=False)
-
     async def get_real_volume_ratio(self, symbol: str) -> float:
         """获取真实交易量占比"""
         if self.order_recorder:
@@ -1507,15 +1756,12 @@ class OrderManager:
         return {}
 
     def record_trade(self, trade_data: Dict[str, Any], trade_purpose: str = "market_making"):
-        """记录成交数据"""
+        """记录成交数据到数据库"""
         if self.order_recorder:
             trade_data["strategy_name"] = self.strategy_name
             trade_data["trade_purpose"] = trade_purpose
             # 使用线程安全的方式调度异步记录
             self._schedule_async(self.order_recorder.record_trade(trade_data))
-
-        self.canceled_orders = []
-        self.filled_orders = []
 
     def get_recent_fills_count(self, window_seconds: int = 60) -> int:
         """
@@ -1575,52 +1821,6 @@ class OrderManager:
         # 保留最近100条记录（通常60秒内不会超过这个数量）
         if len(self.recent_fills) > 100:
             self.recent_fills = self.recent_fills[-100:]
-        # self.sent_orders = {}
-
-    def write_orders(self):
-        """
-        【已弃用】订单CSV记录功能
-
-        此方法已被弃用，订单数据现在统一通过OrderStateManager和order_recorder
-        持久化到PostgreSQL数据库。保留此方法仅为向后兼容。
-
-        弃用原因：
-        1. CSV与数据库双重记录导致数据不一致
-        2. CSV文件操作缺乏原子性和并发安全性
-        3. 状态重置操作（清空open_orders, filled_orders）可能导致数据丢失
-        4. PostgreSQL提供更好的查询、分析和审计能力
-
-        迁移指南：
-        - 订单状态由OrderStateManager统一管理，自动持久化
-        - 查询未完成订单：通过self.open_orders访问（实时缓存）
-        - 查询历史订单：使用order_recorder.query_orders()
-        - 如需导出CSV：使用order_recorder的导出功能
-        """
-        logging.warning(
-            "write_orders() 已弃用，订单数据由OrderStateManager自动管理。"
-            "此调用将被忽略。"
-        )
-        return
-
-    ###
-    # order manager system
-    # csv 只记录成交记录，deepcopy，线程锁
-    #
-
-    def write_trading_history(self):
-        if len(self.trading_history) == 0:
-            return
-
-        df = pd.DataFrame(self.trading_history)
-        # logging.info(f"writing {len(self.trading_history)} trading history in to csv file")
-        df.to_csv(self.trading_history_csv_file, mode="a", index=False, header=False)
-
-    def read_orders(self):
-        df = pd.read_csv(self.open_orders_csv_file)
-        data = df.to_dict(orient="records")
-        # logging.info(f"read {len(data)} orders from csv file")
-        return data
-
     def get_balance(self, symbol):
         balance = self.client.balances([symbol])
 
@@ -1635,8 +1835,13 @@ class OrderManager:
         """
         # 使用市场价格替代中间价
         try:
-            ticker = self.client.ticker(symbol)
-            mid_price = float(ticker["price"])
+            # ✅ 修复：使用正确的 XT API 方法
+            ticker_data = self.client.get_tickers_24h(symbol=symbol)
+            if ticker_data and len(ticker_data) > 0:
+                # ticker_data 返回列表，取第一个元素的 'c' 字段（close price）
+                mid_price = float(ticker_data[0]["c"])
+            else:
+                raise ValueError("未获取到有效的ticker数据")
         except Exception as e:
             logging.warning(f"获取市场价格失败: {e}，使用上次价格")
             mid_price = getattr(self, '_last_mid_price', 0)
@@ -1852,8 +2057,6 @@ class OrderManager:
 
                         del self.sent_orders[res["orderId"]]
 
-        self.write_history_orders()
-
         depth = self.get_depth_data(symbol)
         mid_price = get_mid_price(depth)
 
@@ -1885,8 +2088,7 @@ class OrderManager:
         Returns:
             tuple: (delta_position, position, mid_price, amount)
         """
-        # self.rese
-        # self.write_history_orders()
+
         
         # ✅ 优先使用WebSocket缓存，避免REST API调用
         if self.use_order_websocket and self.order_ws_client:
@@ -1903,24 +2105,7 @@ class OrderManager:
             self.reset_open_orders(symbol)
 
         order_ids = [str(order_id) for order_id in self.open_orders]
-        logging.info(self.open_orders)
-        # open orders from (local csv file + self.open_orders)
-
-        pre_order_ids = []
-        try:
-            if os.stat(self.open_orders_csv_file).st_size > 0:
-                data = self.read_orders()
-                for rec in data:
-                    if rec["orderId"] not in order_ids:
-                        pre_order_ids.append(str(rec["orderId"]))
-        except Exception as e:
-            logging.error(e)
-            pass
-
-        logging.info(
-            f"find {len(order_ids)} in memory and {len(pre_order_ids)} in local"
-        )
-        # order_ids += pre_order_ids
+        logging.debug(f"当前内存中有 {len(order_ids)} 个订单")
 
         # remove canceled orders
         order_ids = [
@@ -2078,9 +2263,11 @@ class OrderManager:
         - Level 2 仅在有订单时执行分档撤单（启动时跳过）
         - 修复了启动阶段 Level 2 无法启动的问题
         """
-
+        logging.info(f"🔍 risk_actions 被调用: risk_level={risk_level}, symbol={symbol}")
+        
         if risk_level == 1:
             # 极高风险：立即停止所有交易
+            logging.warning(f"⚠️ risk_level=1 极高风险，停止交易")
             self.cancel_all_open_orders(symbol=symbol)
             return False
 
@@ -2097,10 +2284,16 @@ class OrderManager:
                 self.cancel_orders_bytier(symbol=symbol, tier_limit=int(self.tier * 2 / 3))
             else:
                 logging.info(f"风险等级 {risk_level}: 无订单，跳过分档撤单，允许继续交易")
+            logging.info(f"✅ risk_level=2 返回 True，允许交易")
             return True  # ✅ 允许继续交易
 
         elif risk_level == 3:
             # 正常风险：正常交易
+            logging.info(f"✅ risk_level=3 正常风险，返回 True")
+            return True
+        else:
+            # 未知风险等级，默认允许交易但记录警告
+            logging.warning(f"⚠️ 未知风险等级 {risk_level}，默认允许交易")
             return True
 
     def cleanup(self):
