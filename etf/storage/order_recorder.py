@@ -1,17 +1,14 @@
 """
 订单记录器 - 负责记录所有订单和交易数据
-支持异步写入PostgreSQL，带重试和CSV降级机制
+支持异步写入PostgreSQL，带重试机制
 """
 
 import logging
 import json
 import time
 import asyncio
-import pandas as pd
 import os
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
-import aiofiles
 import redis.asyncio as aioredis
 from typing import Dict, List, Optional, Any
 import threading
@@ -140,7 +137,6 @@ class OrderRecorder:
             "hedging_volume": 0.0,
             "db_write_success": 0,
             "db_write_failed": 0,
-            "csv_fallback_count": 0,
         }
 
         # 启动标志
@@ -152,10 +148,6 @@ class OrderRecorder:
         self.async_session = None
         self.redis = None
         self._db_available = False
-
-        # CSV降级路径
-        self.csv_dir = Path("logs/order_records")
-        self.csv_dir.mkdir(parents=True, exist_ok=True)
 
     async def init_db(self):
         """初始化数据库连接"""
@@ -184,7 +176,7 @@ class OrderRecorder:
 
         except Exception as e:
             self._db_available = False
-            logging.error(f"PostgreSQL连接失败: {e}, 将使用CSV降级方案")
+            logging.error(f"PostgreSQL连接失败: {e}, 订单数据将暂存于内存队列")
 
         # 注意：Redis连接现在在后台线程中初始化（通过initialize_in_loop方法）
         # 不在主线程初始化，避免事件循环冲突
@@ -493,11 +485,8 @@ class OrderRecorder:
             except Exception as e:
                 self.stats["db_write_failed"] += len(orders)
                 logging.error(f"❌ PostgreSQL写入订单失败: {e}")
-                # 标记数据库不可用，降级到CSV
+                # 标记数据库不可用
                 self._db_available = False
-
-        # 降级到CSV文件
-        await self._write_orders_to_csv(orders)
 
     async def _insert_orders_one_by_one(self, orders: List[Dict]):
         """逐条插入订单（处理重复数据）"""
@@ -535,23 +524,6 @@ class OrderRecorder:
 
         if success_count > 0:
             logging.info(f"✅ 逐条插入成功 {success_count}/{len(orders)} 条订单")
-
-    async def _write_orders_to_csv(self, orders: List[Dict]):
-        """降级方案：写入CSV文件"""
-        try:
-            df = pd.DataFrame(orders)
-            csv_file = self.csv_dir / f"orders_{datetime.now().strftime('%Y%m%d')}.csv"
-
-            if csv_file.exists():
-                df.to_csv(csv_file, mode="a", header=False, index=False)
-            else:
-                df.to_csv(csv_file, index=False)
-
-            self.stats["csv_fallback_count"] += len(orders)
-            logging.info(f"📝 降级写入 {len(orders)} 条订单记录到CSV: {csv_file.name}")
-
-        except Exception as e:
-            logging.error(f"CSV写入订单失败: {e}")
 
     @retry(
         stop=stop_after_attempt(3),
@@ -621,9 +593,6 @@ class OrderRecorder:
                 logging.error(f"❌ PostgreSQL写入成交失败: {e}")
                 self._db_available = False
 
-        # 降级到CSV文件
-        await self._write_trades_to_csv(trades)
-
     async def _insert_trades_one_by_one(self, trades: List[Dict]):
         """逐条插入成交（处理重复数据）"""
         success_count = 0
@@ -657,23 +626,6 @@ class OrderRecorder:
 
         if success_count > 0:
             logging.info(f"✅ 逐条插入成功 {success_count}/{len(trades)} 条成交")
-
-    async def _write_trades_to_csv(self, trades: List[Dict]):
-        """降级方案：写入CSV文件"""
-        try:
-            df = pd.DataFrame(trades)
-            csv_file = self.csv_dir / f"trades_{datetime.now().strftime('%Y%m%d')}.csv"
-
-            if csv_file.exists():
-                df.to_csv(csv_file, mode="a", header=False, index=False)
-            else:
-                df.to_csv(csv_file, index=False)
-
-            self.stats["csv_fallback_count"] += len(trades)
-            logging.info(f"📝 降级写入 {len(trades)} 条成交记录到CSV: {csv_file.name}")
-
-        except Exception as e:
-            logging.error(f"CSV写入成交失败: {e}")
 
     def get_stats(self) -> Dict[str, Any]:
         """获取统计信息"""

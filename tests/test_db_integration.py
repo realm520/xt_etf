@@ -70,11 +70,10 @@ async def test_order_recording():
 
     logger.info("\n📊 订单记录器统计:")
     logger.info(f"  总订单数: {stats['total_orders']}")
-    logger.info(f"  真实订单: {stats['real_orders']}")
-    logger.info(f"  刷量订单: {stats['wash_orders']}")
+    logger.info(f"  真实订单: {stats.get('real_orders', 'N/A')}")
+    logger.info(f"  刷量订单: {stats.get('wash_orders', 'N/A')}")
     logger.info(f"  数据库写入成功: {stats['db_write_success']}")
     logger.info(f"  数据库写入失败: {stats['db_write_failed']}")
-    logger.info(f"  CSV降级次数: {stats['csv_fallback_count']}")
     logger.info(f"  数据库可用: {'✅ 是' if stats['db_available'] else '❌ 否'}")
     logger.info(f"  队列状态: 订单队列={stats['queue_sizes']['orders']}, 成交队列={stats['queue_sizes']['trades']}")
 
@@ -217,7 +216,7 @@ async def main():
         if stats1["db_available"]:
             logger.info("✅ PostgreSQL连接: 成功")
         else:
-            logger.info("❌ PostgreSQL连接: 失败（已降级到CSV）")
+            logger.info("❌ PostgreSQL连接: 失败")
 
         if stats1["db_write_success"] > 0:
             logger.info(f"✅ 数据库写入: 成功 ({stats1['db_write_success']} 条记录)")
@@ -236,7 +235,6 @@ async def main():
         else:
             logger.info("  - PostgreSQL连接失败，请检查配置")
             logger.info("  - 运行 'python scripts/init_database.py' 初始化数据库")
-            logger.info("  - 数据已降级保存到CSV文件: logs/order_records/")
 
         logger.info("=" * 60 + "\n")
 

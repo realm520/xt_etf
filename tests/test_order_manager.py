@@ -9,7 +9,6 @@ Date: 2025-01-22
 
 import time
 import pytest
-import pandas as pd
 from unittest.mock import MagicMock, patch, call
 from datetime import datetime
 
@@ -262,26 +261,6 @@ class TestOrderManager:
         # 验证洗盘交易被正确标记
         call_args = order_manager.client.batch_orders.call_args
         assert call_args is not None
-
-    @patch("pandas.DataFrame.to_csv")
-    def test_write_orders_csv(self, mock_to_csv, order_manager):
-        """测试写入订单CSV文件"""
-        # 添加一些测试数据
-        order_manager.open_orders = {
-            "test_id": {
-                "symbol": "BTCUSDT",
-                "orderId": "12345",
-                "side": "BUY",
-                "price": 50000.0,
-                "quantity": 0.001,
-                "status": "NEW"
-            }
-        }
-        
-        order_manager.write_orders()
-        
-        # 验证CSV文件被写入
-        assert mock_to_csv.call_count >= 1
 
     def test_error_handling_with_retry(self, order_manager):
         """测试带重试的错误处理"""

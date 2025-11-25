@@ -80,6 +80,7 @@ class OrderStateManager:
         filled_orders: List,
         canceled_orders: List,
         order_recorder=None,
+        async_scheduler=None,
         logger: Optional[logging.Logger] = None
     ):
         """
@@ -90,6 +91,7 @@ class OrderStateManager:
             filled_orders: OrderManager的已成交订单列表引用
             canceled_orders: OrderManager的已取消订单列表引用
             order_recorder: 订单记录器实例 (可选)
+            async_scheduler: 异步任务调度函数，用于调用async方法 (可选)
             logger: 日志记录器 (可选)
         """
         # 引用OrderManager的数据结构（避免拷贝）
@@ -99,6 +101,9 @@ class OrderStateManager:
 
         # 订单记录器（用于数据库持久化）
         self.order_recorder = order_recorder
+        
+        # 异步任务调度器（用于从同步方法调用async方法）
+        self.async_scheduler = async_scheduler
 
         # 日志记录器
         self.logger = logger or logging.getLogger(__name__)
@@ -401,14 +406,35 @@ class OrderStateManager:
             trigger_source: 触发来源
         """
         if not self.order_recorder:
+            self.logger.debug("order_recorder未配置，跳过成交记录")
             return
 
         try:
-            # 如果order_recorder有record_trade方法，则调用
+            # 调用order_recorder.record_trade记录成交
             if hasattr(self.order_recorder, 'record_trade'):
-                # 注意：原有代码中record_trade参数可能不同，需要适配
-                # 这里保持简单调用，具体参数由OrderManager适配
-                pass
+                # 添加触发来源信息
+                trade_data_copy = trade_data.copy()
+                trade_data_copy['trigger_source'] = trigger_source
+                
+                # 使用异步调度器调用async方法
+                if self.async_scheduler:
+                    coro = self.order_recorder.record_trade(trade_data_copy)
+                    self.async_scheduler(coro)
+                    self.logger.debug(
+                        f"成交记录已调度: orderId={trade_data.get('orderId')}, "
+                        f"qty={trade_data.get('quantity')}, price={trade_data.get('price')}"
+                    )
+                else:
+                    # 降级：直接放入队列（不更新Redis缓存）
+                    if hasattr(self.order_recorder, 'trade_queue'):
+                        from datetime import datetime, timezone
+                        trade_data_copy['recorded_at'] = datetime.now(timezone.utc)
+                        self.order_recorder.trade_queue.put_nowait(trade_data_copy)
+                        self.logger.debug(
+                            f"成交直接入队: orderId={trade_data.get('orderId')}"
+                        )
+                    else:
+                        self.logger.warning("async_scheduler和trade_queue都不可用，成交未记录")
 
         except Exception as e:
             self.logger.error(
