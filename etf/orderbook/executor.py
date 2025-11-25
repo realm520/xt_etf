@@ -111,6 +111,10 @@ class OrderExecutor:
 
         # === 0. 订单数量监控和告警 ===
         current_order_count = len(current_orders)
+        order_overflow = False  # 标记是否订单超标
+        
+        # 按订单类型统计
+        order_stats = self._count_orders_by_type(current_orders)
         
         if self.max_layer is not None:
             # 计算告警阈值
@@ -120,17 +124,30 @@ class OrderExecutor:
             if current_order_count > critical_threshold:
                 self.logger.error(
                     f"🚨 订单数量严重超标: {current_order_count} > {critical_threshold:.0f} "
-                    f"(配置: {self.max_layer}档, 危急阈值: 150%)"
+                    f"(配置: {self.max_layer}档, 危急阈值: 150%) - 暂停添加新订单，优先清理"
                 )
+                self.logger.error(
+                    f"📊 订单类型分布: 做市={order_stats['market_making']}, "
+                    f"反针对={order_stats['anti_pin']}, 洗盘={order_stats['wash_trading']}, "
+                    f"对冲={order_stats['hedging']}, 未知={order_stats['unknown']}"
+                )
+                order_overflow = True
             elif current_order_count > warning_threshold:
                 self.logger.warning(
                     f"⚠️ 订单数量超标: {current_order_count} > {warning_threshold:.0f} "
                     f"(配置: {self.max_layer}档, 警告阈值: 120%)"
                 )
+                self.logger.warning(
+                    f"📊 订单类型分布: 做市={order_stats['market_making']}, "
+                    f"反针对={order_stats['anti_pin']}, 洗盘={order_stats['wash_trading']}, "
+                    f"对冲={order_stats['hedging']}, 未知={order_stats['unknown']}"
+                )
             else:
                 self.logger.debug(
                     f"📊 订单数量正常: {current_order_count}/{self.max_layer} "
-                    f"({current_order_count/self.max_layer:.1%})"
+                    f"({current_order_count/self.max_layer:.1%}) | "
+                    f"做市={order_stats['market_making']}, 反针对={order_stats['anti_pin']}, "
+                    f"洗盘={order_stats['wash_trading']}, 对冲={order_stats['hedging']}, 未知={order_stats['unknown']}"
                 )
 
         # === 1. 订单匹配分析 ===
@@ -138,12 +155,37 @@ class OrderExecutor:
             current_orders, target_orders
         )
 
+        # === 1.5 硬性订单上限保护 ===
+        # 计算可用槽位：max_layer - 当前订单数 - 预留给反针对的槽位
+        if self.max_layer is not None:
+            anti_pin_reserve = 10  # 预留10个槽位给反针对订单
+            available_slots = max(0, self.max_layer - current_order_count - anti_pin_reserve)
+            
+            if len(optimized_add_orders) > available_slots:
+                original_count = len(optimized_add_orders)
+                optimized_add_orders = optimized_add_orders[:available_slots]
+                self.logger.warning(
+                    f"🔒 硬性上限保护: 截断做市订单 {original_count} → {len(optimized_add_orders)} "
+                    f"(当前={current_order_count}, 上限={self.max_layer}, 可用槽位={available_slots})"
+                )
+
         # 为每个新订单设置clientOrderId和order_purpose
         for order_data in optimized_add_orders:
-            order_data["clientOrderId"] = self.order_manager.create_temp_id()
-            # 如果订单未指定用途，默认为做市订单
+            # 根据订单类型设置带前缀的clientOrderId
+            base_id = self.order_manager.create_temp_id()
             if "order_purpose" not in order_data:
                 order_data["order_purpose"] = "market_making"
+            
+            # 根据order_purpose设置clientOrderId前缀
+            purpose = order_data["order_purpose"]
+            if purpose == "market_making":
+                order_data["clientOrderId"] = f"mm_{base_id}"
+            elif purpose == "anti_pin":
+                order_data["clientOrderId"] = f"antipin_{base_id}"
+            elif purpose == "wash_trading":
+                order_data["clientOrderId"] = f"wash_{base_id}"
+            else:
+                order_data["clientOrderId"] = base_id
 
         # === 2. 识别超范围订单 ===
         out_of_range_orders = self._find_out_of_range_orders(
@@ -156,34 +198,76 @@ class OrderExecutor:
             f"取消: {len(optimized_cancel_orders)}"
         )
 
-        # === 3. 添加反针对订单 ===
+        # === 3. 添加反针对订单（受上限保护）===
         if anti_pin_config:
             anti_pin_orders = self._create_anti_pin_orders(
                 best_sell, best_buy, anti_pin_config
             )
+            
+            # 检查是否有足够槽位添加反针对订单
+            if self.max_layer is not None:
+                total_after_add = current_order_count + len(optimized_add_orders) + len(anti_pin_orders)
+                if total_after_add > self.max_layer:
+                    # 计算可用槽位
+                    remaining_slots = max(0, self.max_layer - current_order_count - len(optimized_add_orders))
+                    if remaining_slots < len(anti_pin_orders):
+                        original_antipin_count = len(anti_pin_orders)
+                        anti_pin_orders = anti_pin_orders[:remaining_slots]
+                        self.logger.warning(
+                            f"🔒 反针对订单截断: {original_antipin_count} → {len(anti_pin_orders)} "
+                            f"(总计将达到: {current_order_count + len(optimized_add_orders) + len(anti_pin_orders)}/{self.max_layer})"
+                        )
+            
             optimized_add_orders.extend(anti_pin_orders)
 
-        # === 4. 执行订单操作（先加后删）===
+        # === 4. 执行订单操作 ===
         successful_add = 0
         failed_add = 0
         successful_cancel = 0
         failed_cancel = 0
+        
+        # 保存原始数量用于统计
+        total_add_planned = len(optimized_add_orders)
+        total_cancel_planned = len(optimized_cancel_orders)
 
-        # 步骤1: 批量添加新订单
-        if optimized_add_orders:
-            add_result = self._execute_add_orders(optimized_add_orders)
-            successful_add = add_result.order_count if add_result.success else 0
-            failed_add = len(optimized_add_orders) - successful_add
+        # 订单超标时：改为先删后加，且限制新增数量
+        if order_overflow:
+            self.logger.warning(
+                f"🛑 订单超标保护启动: 先清理 {len(optimized_cancel_orders)} 个订单，"
+                f"暂停添加 {len(optimized_add_orders)} 个新订单"
+            )
+            
+            # 步骤1: 先批量取消旧订单（清理超量）
+            if optimized_cancel_orders:
+                cancel_result = self._execute_cancel_orders(optimized_cancel_orders)
+                successful_cancel = cancel_result.order_count if cancel_result.success else 0
+                failed_cancel = len(optimized_cancel_orders) - successful_cancel
+            
+            # 步骤2: 等待取消生效
+            if optimized_cancel_orders:
+                time.sleep(0.2)
+            
+            # 步骤3: 跳过添加新订单（等下一轮再添加）
+            failed_add = len(optimized_add_orders)
+            optimized_add_orders = []  # 清空，跳过添加
+            
+        else:
+            # 正常模式：先加后删
+            # 步骤1: 批量添加新订单
+            if optimized_add_orders:
+                add_result = self._execute_add_orders(optimized_add_orders)
+                successful_add = add_result.order_count if add_result.success else 0
+                failed_add = len(optimized_add_orders) - successful_add
 
-        # 步骤2: 等待新订单上盘
-        if optimized_add_orders:
-            time.sleep(0.1)
+            # 步骤2: 等待新订单上盘
+            if optimized_add_orders:
+                time.sleep(0.1)
 
-        # 步骤3: 批量取消旧订单
-        if optimized_cancel_orders:
-            cancel_result = self._execute_cancel_orders(optimized_cancel_orders)
-            successful_cancel = cancel_result.order_count if cancel_result.success else 0
-            failed_cancel = len(optimized_cancel_orders) - successful_cancel
+            # 步骤3: 批量取消旧订单（正常模式下，order_overflow时已在前面执行）
+            if optimized_cancel_orders:
+                cancel_result = self._execute_cancel_orders(optimized_cancel_orders)
+                successful_cancel = cancel_result.order_count if cancel_result.success else 0
+                failed_cancel = len(optimized_cancel_orders) - successful_cancel
 
         # === 5. 清理旧的反针对订单 ===
         if anti_pin_config:
@@ -196,8 +280,8 @@ class OrderExecutor:
         execution_time = time.time() - start_time
 
         summary = ExecutionSummary(
-            total_add=len(optimized_add_orders),
-            total_cancel=len(optimized_cancel_orders),
+            total_add=total_add_planned,
+            total_cancel=total_cancel_planned,
             successful_add=successful_add,
             successful_cancel=successful_cancel,
             failed_add=failed_add,
@@ -208,6 +292,44 @@ class OrderExecutor:
         self.logger.info(summary.summary_text())
 
         return summary
+
+    def _count_orders_by_type(
+        self, orders: List[Dict[str, Any]]
+    ) -> Dict[str, int]:
+        """按订单类型统计订单数量
+        
+        根据 clientOrderId 前缀判断订单类型：
+        - mm_: market_making (做市订单)
+        - antipin_: anti_pin (反针对订单)
+        - wash_: wash_trading (洗盘订单)
+        - 其他: unknown (未知类型，可能是旧版纯数字ID)
+        
+        Returns:
+            Dict: 各类型订单数量统计
+        """
+        stats = {
+            "market_making": 0,
+            "anti_pin": 0,
+            "wash_trading": 0,
+            "hedging": 0,
+            "unknown": 0,
+        }
+        
+        for order in orders:
+            client_order_id = order.get("clientOrderId", "") or ""
+            
+            if client_order_id.startswith("mm_"):
+                stats["market_making"] += 1
+            elif client_order_id.startswith("antipin_"):
+                stats["anti_pin"] += 1
+            elif client_order_id.startswith("wash_"):
+                stats["wash_trading"] += 1
+            elif client_order_id.startswith("hedge_"):
+                stats["hedging"] += 1
+            else:
+                stats["unknown"] += 1
+        
+        return stats
 
     def _match_orders(
         self,
@@ -299,8 +421,9 @@ class OrderExecutor:
 
         anti_pin_orders = []
 
-        # 创建反针对卖单
-        sell_client_order_id = self.order_manager.create_temp_id()
+        # 创建反针对卖单（使用 antipin_ 前缀）
+        sell_base_id = self.order_manager.create_temp_id()
+        sell_client_order_id = f"antipin_{sell_base_id}"
         sell_order_data = {
             "symbol": self.symbol,
             "clientOrderId": sell_client_order_id,
@@ -316,8 +439,9 @@ class OrderExecutor:
         anti_pin_orders.append(sell_order_data)
         self.current_anti_pin_order_ids.append(sell_client_order_id)
 
-        # 创建反针对买单
-        buy_client_order_id = self.order_manager.create_temp_id()
+        # 创建反针对买单（使用 antipin_ 前缀）
+        buy_base_id = self.order_manager.create_temp_id()
+        buy_client_order_id = f"antipin_{buy_base_id}"
         buy_order_data = {
             "symbol": self.symbol,
             "clientOrderId": buy_client_order_id,
@@ -361,7 +485,9 @@ class OrderExecutor:
                 res = self.order_manager.add_orders_batch(batch, batch_id=None)
                 if res:
                     total_success += len(batch)
-                self.logger.info(f"✅ 成功添加 {len(batch)} 个新订单")
+                    self.logger.info(f"✅ 成功添加 {len(batch)} 个新订单")
+                else:
+                    self.logger.warning(f"⚠️ 添加订单被跳过: {len(batch)} 个 (熔断器或其他原因)")
             except Exception as e:
                 self.logger.error(f"❌ 批量添加订单失败: {e}")
 
@@ -387,7 +513,9 @@ class OrderExecutor:
                 res = self.order_manager.cancel_orders_batch(orders=batch)
                 if res:
                     total_success += len(batch)
-                self.logger.info(f"✅ 成功取消 {len(batch)} 个旧订单")
+                    self.logger.info(f"✅ 成功取消 {len(batch)} 个旧订单")
+                else:
+                    self.logger.warning(f"⚠️ 取消订单失败: {len(batch)} 个, API返回: {res}")
             except Exception as e:
                 self.logger.error(f"❌ 批量取消订单失败: {e}")
 

@@ -23,6 +23,7 @@ from .executor import OrderExecutor, ExecutionResult, ExecutionSummary
 
 # 自动导入所有算法（触发装饰器注册）
 from . import natural
+from . import layered
 
 # ✅ 旧函数已删除，不再需要向后兼容
 

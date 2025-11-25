@@ -70,9 +70,50 @@ class NaturalAlgorithm(OrderbookAlgorithm):
         n_bid = n // 2
         n_ask = n - n_bid
 
+        # 记录关键参数（调试用）
+        import logging
+        logging.info(f"📊 订单簿生成参数: 净值={self.config.mid_price:.6f}, spread={self.config.bid_ask_spread:.4f}")
+        logging.info(f"   预期买1: {self.config.mid_price * (1 - self.config.bid_ask_spread/2):.6f}")
+        logging.info(f"   预期卖1: {self.config.mid_price * (1 + self.config.bid_ask_spread/2):.6f}")
+
         # 生成价格
         bid_prices = self._generate_prices(n_bid, side='bid')
         ask_prices = self._generate_prices(n_ask, side='ask')
+        
+        # ✅ 价格边界检查（关键修复）
+        mid_price = self.config.mid_price
+        spread = self.config.bid_ask_spread
+        
+        # 检查买盘价格是否在净值下方
+        max_bid_price = float(np.max(bid_prices))
+        expected_max_bid = mid_price * (1 - spread / 2)
+        if max_bid_price > mid_price:
+            logging.error(f"❌ 买盘价格异常：最高买价({max_bid_price:.6f}) > 净值({mid_price:.6f})")
+            logging.error(f"   预期最高买价: {expected_max_bid:.6f}")
+        
+        # 检查卖盘价格是否在净值上方
+        min_ask_price = float(np.min(ask_prices))
+        expected_min_ask = mid_price * (1 + spread / 2)
+        if min_ask_price < mid_price:
+            logging.error(f"❌ 卖盘价格异常：最低卖价({min_ask_price:.6f}) < 净值({mid_price:.6f})")
+            logging.error(f"   预期最低卖价: {expected_min_ask:.6f}")
+            logging.error(f"   卖盘价格范围: {min_ask_price:.6f} - {float(np.max(ask_prices)):.6f}")
+            logging.error(f"   买盘价格范围: {float(np.min(bid_prices)):.6f} - {max_bid_price:.6f}")
+            
+            # 🔧 强制修正卖盘价格（应急措施）
+            logging.warning(f"🔧 强制修正卖盘价格到合理范围...")
+            ask_prices = ask_prices * (expected_min_ask / min_ask_price)
+            min_ask_price = float(np.min(ask_prices))  # ✅ 更新变量！
+            logging.warning(f"   修正后最低卖价: {min_ask_price:.6f}")
+        
+        # 检查盘口是否交叉
+        if max_bid_price >= min_ask_price:
+            logging.error(f"❌ 盘口交叉：买1({max_bid_price:.6f}) >= 卖1({min_ask_price:.6f})")
+            raise ValueError(f"盘口交叉错误：买1({max_bid_price:.6f}) >= 卖1({min_ask_price:.6f})")
+        
+        logging.info(f"✅ 价格范围验证通过:")
+        logging.info(f"   买盘: {float(np.min(bid_prices)):.6f} - {max_bid_price:.6f}")
+        logging.info(f"   卖盘: {min_ask_price:.6f} - {float(np.max(ask_prices)):.6f}")
 
         # 生成数量
         bid_quantities = self._generate_quantities(bid_prices, naturalness)
@@ -278,23 +319,59 @@ class NaturalAlgorithm(OrderbookAlgorithm):
         
         return quantities
 
+    def _get_clustering_step(self, price: float) -> float:
+        """根据价格范围选择合适的聚类粒度
+        
+        Args:
+            price: 价格
+            
+        Returns:
+            聚类粒度（如 0.01, 1, 100 等）
+        """
+        if price < 0.1:
+            return 0.001  # 小数点后3位
+        elif price < 1:
+            return 0.01   # 小数点后2位
+        elif price < 10:
+            return 0.1    # 小数点后1位
+        elif price < 100:
+            return 1      # 整数位
+        elif price < 1000:
+            return 10     # 整十位
+        else:
+            return 100    # 整百位
+    
     def _generate_clustered_prices(
         self,
         start: float,
         end: float,
         n: int
     ) -> np.ndarray:
-        """整数聚类价格生成"""
+        """智能整数聚类价格生成
+        
+        根据价格范围自动选择合适的聚类粒度：
+        - 低价币（< 1）：聚类到 0.01 或 0.001
+        - 中价币（1-1000）：聚类到 1 或 10
+        - 高价币（> 1000）：聚类到 100 或 1000
+        """
         # 基础对数分布
         base_prices = np.geomspace(start, end, n)
 
-        # 向整数价位聚拢（10%概率）
+        # 向合适粒度的价位聚拢（10%概率）
         for i in range(n):
             if np.random.random() < 0.1:
-                # 找最近的整百价位
-                round_price = round(base_prices[i] / 100) * 100
-                # 向其靠拢
-                base_prices[i] = (base_prices[i] + round_price) / 2
+                price = base_prices[i]
+                # 根据价格选择聚类粒度
+                step = self._get_clustering_step(price)
+                
+                # 找最近的目标价位
+                round_price = round(price / step) * step
+                
+                # ✅ 验证聚类结果合理性
+                if round_price > 0 and abs(round_price - price) / price < 0.5:
+                    # 向其靠拢（避免完全对齐，保持自然度）
+                    base_prices[i] = (price + round_price) / 2
+                # 否则保持原价格不变
 
         return base_prices
 
