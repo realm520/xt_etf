@@ -28,7 +28,7 @@ class TestWebSocketIntegration:
     def mock_symbol_config(self):
         """创建模拟Symbol配置"""
         config = Mock()
-        config.symbol_configs = {"btc_usdt": {"price_precision": 2}}
+        config._config_cache = {"btc_usdt": {"price_precision": 2}}
         return config
 
     @patch('etf.order_manager.ORDER_WEBSOCKET_AVAILABLE', True)

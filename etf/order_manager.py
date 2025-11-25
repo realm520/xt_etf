@@ -274,7 +274,7 @@ class OrderManager:
             symbol = None
             if hasattr(self, 'symbol_config') and self.symbol_config:
                 # 从symbol_config获取symbol
-                symbols = list(self.symbol_config.symbol_configs.keys())
+                symbols = list(self.symbol_config._config_cache.keys())
                 if symbols:
                     symbol = symbols[0]
             
@@ -282,13 +282,26 @@ class OrderManager:
                 logging.warning("无法获取symbol，WebSocket订单监听器初始化失败")
                 return
             
+            # 根据环境选择WebSocket URL
+            ws_url = "wss://stream.xt.com/private"  # 默认生产环境
+            client_host = getattr(self.client, 'host', None)
+            logging.info(f"客户端host: {client_host}")
+            if client_host:
+                if 'qa2' in client_host.lower():
+                    ws_url = "wss://stream.xt-qa2.com/private"
+                    logging.info(f"检测到QA2环境，使用WebSocket URL: {ws_url}")
+                else:
+                    logging.info(f"生产环境，使用WebSocket URL: {ws_url}")
+            
             # 创建WebSocket订单监听器
             self.order_ws_client = OrderWebSocketClient(
-                access_key=self.client.api_key,
-                secret_key=self.client.api_secret,
+                access_key=self.client.access_key,
+                secret_key=self.client.secret_key,
                 symbol=symbol,
+                ws_url=ws_url,
                 on_order_update=self._on_order_update,
-                on_trade=self._on_trade
+                on_trade=self._on_trade,
+                client=self.client
             )
             
             # 启动WebSocket连接（在后台线程中运行）

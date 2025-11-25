@@ -56,7 +56,8 @@ class OrderWebSocketClient:
         reconnect_delay: int = 5,
         max_reconnect_attempts: int = 10,
         on_order_update: Optional[Callable] = None,
-        on_trade: Optional[Callable] = None
+        on_trade: Optional[Callable] = None,
+        client=None
     ):
         """
         初始化订单WebSocket客户端
@@ -82,6 +83,7 @@ class OrderWebSocketClient:
         self.access_key = access_key
         self.secret_key = secret_key
         self.symbol = symbol.lower()
+        self.client = client  # REST API client for getting listenKey
         self.ws_url = ws_url
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
@@ -163,16 +165,25 @@ class OrderWebSocketClient:
             listenKey字符串，失败返回None
 
         Note:
-            实际实现需要调用XT REST API的 POST /v4/ws-token 接口
-            这里提供接口定义，具体实现需要client实例
+            调用XT REST API的 POST /v4/ws-token 接口
         """
         try:
-            # TODO: 实现REST API调用获取listenKey
-            # 示例响应: {"listenKey": "pqia91ma19a5s61cv6a81va65sdf19v8a65a1a5s61cv6a81va65sdf19v8a65a1"}
-
-            # 临时实现：需要传入client实例
-            logger.warning("listenKey获取功能需要REST API client支持")
-            return None
+            if self.client is None:
+                logger.warning("listenKey获取功能需要REST API client支持")
+                return None
+            
+            # 使用client获取listenKey
+            result = self.client.get_listen_key()
+            if result and isinstance(result, str):
+                logger.info(f"成功获取listenKey: {result[:20]}...")
+                return result
+            elif result and isinstance(result, dict) and 'accessToken' in result:
+                listen_key = result['accessToken']
+                logger.info(f"成功获取listenKey: {listen_key[:20]}...")
+                return listen_key
+            else:
+                logger.warning(f"获取listenKey返回格式异常: {result}")
+                return None
 
         except Exception as e:
             logger.error(f"获取listenKey失败: {e}")
@@ -211,7 +222,8 @@ class OrderWebSocketClient:
 
                 # Step 2: 连接WebSocket（带listenKey）
                 url = f"{self.ws_url}?listenKey={self._listen_key}"
-                logger.info(f"正在连接订单WebSocket: {url[:60]}...")
+                logger.info(f"WebSocket基础URL: {self.ws_url}")
+                logger.info(f"正在连接订单WebSocket: {url}")
 
                 async with websockets.connect(
                     url,
