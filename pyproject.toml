@@ -53,6 +53,7 @@ dev = [
 [project.scripts]
 # 主命令 - 通过 --strategy 参数指定策略
 etf-run = "run_etf:main"
+net-value = "run_net_value:main"
 
 # 便捷命令 - 直接运行指定策略（自动注入 --strategy 参数）
 etf-stg3l = "etf.cli:run_stg3l"
