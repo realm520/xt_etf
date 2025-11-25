@@ -15,7 +15,8 @@ import threading
 from queue import Queue
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import select, update, insert
+from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError, IntegrityError
 from tenacity import (
     retry,
@@ -446,6 +447,10 @@ class OrderRecorder:
                         timestamp = order.get("timestamp") or order.get("created_at")
                         created_at = to_naive_utc(timestamp)
 
+                        # 兼容多种字段名：status/state, filled_quantity/executed_qty/executedQty
+                        status = order.get("status") or order.get("state", "NEW")
+                        filled_qty = order.get("filled_quantity") or order.get("executed_qty") or order.get("executedQty", 0)
+
                         record = {
                             "symbol": order.get("symbol"),
                             "order_id": order.get("order_id") or order.get("orderId", ""),
@@ -453,9 +458,9 @@ class OrderRecorder:
                             "side": order.get("side"),
                             "order_type": order.get("order_type", "LIMIT"),
                             "price": float(order.get("price", 0)),
-                            "quantity": float(order.get("quantity", 0)),
-                            "status": order.get("status", "NEW"),
-                            "filled_quantity": float(order.get("filled_quantity", 0)),
+                            "quantity": float(order.get("quantity") or order.get("origQty", 0)),
+                            "status": status,
+                            "filled_quantity": float(filled_qty),
                             "strategy_name": order.get("strategy_name"),
                             "order_purpose": order.get("order_purpose", "market_making"),
                             "net_value": float(order.get("net_value")) if order.get("net_value") else None,
@@ -466,19 +471,27 @@ class OrderRecorder:
                         }
                         order_records.append(record)
 
-                    # 使用bulk_insert_mappings提高性能
-                    await session.execute(
-                        insert(OrderModel).values(order_records)
+                    # 使用 PostgreSQL UPSERT（INSERT ON CONFLICT UPDATE）
+                    # 当 order_id 已存在时，更新订单状态和已成交数量
+                    stmt = pg_insert(OrderModel).values(order_records)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=['order_id'],
+                        set_={
+                            'status': stmt.excluded.status,
+                            'filled_quantity': stmt.excluded.filled_quantity,
+                            'updated_at': datetime.now(timezone.utc).replace(tzinfo=None),
+                        }
                     )
+                    await session.execute(stmt)
                     await session.commit()
 
                     self.stats["db_write_success"] += len(orders)
-                    logging.info(f"✅ 成功写入 {len(orders)} 条订单记录到PostgreSQL")
+                    logging.info(f"✅ 成功写入/更新 {len(orders)} 条订单记录到PostgreSQL")
                     return
 
             except IntegrityError as e:
-                # 唯一性约束冲突，尝试逐条插入
-                logging.warning(f"批量插入订单遇到重复数据，尝试逐条插入: {e}")
+                # 仍然保留逐条处理作为备用方案
+                logging.warning(f"批量upsert订单遇到问题，尝试逐条处理: {e}")
                 await self._insert_orders_one_by_one(orders)
                 return
 
@@ -489,14 +502,19 @@ class OrderRecorder:
                 self._db_available = False
 
     async def _insert_orders_one_by_one(self, orders: List[Dict]):
-        """逐条插入订单（处理重复数据）"""
+        """逐条upsert订单（处理重复数据时更新状态）"""
         success_count = 0
+        update_count = 0
         async with self.async_session() as session:
             for order in orders:
                 try:
                     # 获取时间戳并转换为naive UTC（用于PostgreSQL TIMESTAMP WITHOUT TIME ZONE）
                     timestamp = order.get("timestamp") or order.get("created_at")
                     created_at = to_naive_utc(timestamp)
+
+                    # 兼容多种字段名：status/state, filled_quantity/executed_qty/executedQty
+                    status = order.get("status") or order.get("state", "NEW")
+                    filled_qty = order.get("filled_quantity") or order.get("executed_qty") or order.get("executedQty", 0)
 
                     record = {
                         "symbol": order.get("symbol"),
@@ -505,25 +523,35 @@ class OrderRecorder:
                         "side": order.get("side"),
                         "order_type": order.get("order_type", "LIMIT"),
                         "price": float(order.get("price", 0)),
-                        "quantity": float(order.get("quantity", 0)),
-                        "status": order.get("status", "NEW"),
+                        "quantity": float(order.get("quantity") or order.get("origQty", 0)),
+                        "status": status,
+                        "filled_quantity": float(filled_qty),
                         "strategy_name": order.get("strategy_name"),
                         "order_purpose": order.get("order_purpose", "market_making"),
                         "created_at": created_at,
                     }
-                    await session.execute(insert(OrderModel).values(record))
+
+                    # 使用 PostgreSQL UPSERT
+                    stmt = pg_insert(OrderModel).values(record)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=['order_id'],
+                        set_={
+                            'status': stmt.excluded.status,
+                            'filled_quantity': stmt.excluded.filled_quantity,
+                            'updated_at': datetime.now(timezone.utc).replace(tzinfo=None),
+                        }
+                    )
+                    result = await session.execute(stmt)
                     await session.commit()
+
+                    # 判断是新增还是更新（PostgreSQL upsert 返回的行数）
                     success_count += 1
-                except IntegrityError:
-                    # 跳过重复数据
-                    await session.rollback()
-                    continue
                 except Exception as e:
                     await session.rollback()
-                    logging.error(f"插入单条订单失败: {e}")
+                    logging.error(f"upsert单条订单失败: {e}")
 
         if success_count > 0:
-            logging.info(f"✅ 逐条插入成功 {success_count}/{len(orders)} 条订单")
+            logging.info(f"✅ 逐条upsert成功 {success_count}/{len(orders)} 条订单")
 
     @retry(
         stop=stop_after_attempt(3),
