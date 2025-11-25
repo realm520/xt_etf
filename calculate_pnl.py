@@ -1,9 +1,9 @@
-import json
 import logging
 import time
 
 from etf.xt import Spot
 from etf.order_manager import OrderManager
+from etf.config import load_api_keys, load_binance_api_keys
 
 from binance import Client
 
@@ -22,17 +22,27 @@ if __name__ == "__main__":
         "currencies": ["USDT","STG5L"],
     }
     
-    if config["env"] == "qa":
-        spot = Spot(host="https://sapi.xt-qa.com", access_key="be3466e5-365c-4471-a368-7c425fd5dd61",
-                secret_key="9ca42e6db6c35f0ca5f3541737b044c4e3d5abb2")
+    # 使用统一配置加载 API 密钥
+    try:
+        xt_keys = load_api_keys(env=config["env"])
+        bn_keys = load_binance_api_keys()
+    except ValueError as e:
+        logging.error(f"加载 API 密钥失败: {e}")
+        exit(1)
     
-    elif config["env"] == "prod":
-        with open('APIKey.json', 'r', encoding='utf8') as input:
-            apikey = json.load(input)
-            spot = Spot(host="https://sapi.xt.com", access_key=apikey["xt"]["access_key"],
-                secret_key=apikey["xt"]["secret_key"])
+    # 根据环境选择主机
+    if config["env"] == "qa":
+        host = "https://sapi.xt-qa2.com"
+    else:
+        host = "https://sapi.xt.com"
+    
+    spot = Spot(
+        host=host,
+        access_key=xt_keys["access_key"],
+        secret_key=xt_keys["secret_key"]
+    )
 
-    # intennal
+    # internal
     init_usdt = 10000
     init_symbol = 10000
     init_price = 1.0
@@ -40,7 +50,7 @@ if __name__ == "__main__":
     bn_init_position = 2000
 
     order_manager = OrderManager(spot)
-    bn_client = Client(apikey["bn"]["access_key"], apikey["bn"]["secret_key"])
+    bn_client = Client(bn_keys["access_key"], bn_keys["secret_key"])
 
     while True:
         time.sleep(1)

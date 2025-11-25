@@ -3,58 +3,29 @@ from binance import Client
 import time
 import math
 import logging
-import json
-import os
 import pandas as pd
-from pathlib import Path
 
 
 def _load_binance_keys():
     """
-    加载 Binance API 密钥，支持多种方式（按优先级）：
+    加载 Binance API 密钥（使用统一配置加载器）
+    
+    加载优先级：
     1. 环境变量 BN_ACCESS_KEY / BN_SECRET_KEY
     2. .env 文件中的 bn_access_key / bn_secret_key
-    3. APIKey.json 文件（兼容旧版）
+    3. APIKey.json 文件
     """
-    # 尝试从 .env 加载
     try:
-        from dotenv import load_dotenv
-        load_dotenv()
-    except ImportError:
-        pass
-    
-    # 方式1: 环境变量
-    access_key = os.getenv("BN_ACCESS_KEY") or os.getenv("bn_access_key")
-    secret_key = os.getenv("BN_SECRET_KEY") or os.getenv("bn_secret_key")
-    
-    if access_key and secret_key:
-        logging.info("Binance API 密钥已从环境变量加载")
-        return access_key, secret_key
-    
-    # 方式2: APIKey.json 文件（兼容旧版）
-    api_key_paths = [
-        Path("APIKey.json"),
-        Path.home() / ".config" / "xt_etf" / "APIKey.json",
-        Path(__file__).parent / "APIKey.json",
-    ]
-    
-    for path in api_key_paths:
-        if path.exists():
-            try:
-                with open(path, 'r', encoding='utf8') as f:
-                    apikey = json.load(f)
-                    access_key = apikey.get("bn", {}).get("access_key")
-                    secret_key = apikey.get("bn", {}).get("secret_key")
-                    if access_key and secret_key:
-                        logging.info(f"Binance API 密钥已从 {path} 加载")
-                        return access_key, secret_key
-            except Exception as e:
-                logging.warning(f"读取 {path} 失败: {e}")
-    
-    # 未找到密钥
-    logging.warning("未找到 Binance API 密钥，对冲功能将不可用")
-    logging.warning("请设置环境变量 BN_ACCESS_KEY/BN_SECRET_KEY 或创建 APIKey.json")
-    return None, None
+        from etf.config import load_binance_api_keys
+        keys = load_binance_api_keys()
+        return keys["access_key"], keys["secret_key"]
+    except ValueError as e:
+        logging.warning(f"未找到 Binance API 密钥: {e}")
+        logging.warning("对冲功能将不可用")
+        return None, None
+    except Exception as e:
+        logging.error(f"加载 Binance API 密钥失败: {e}")
+        return None, None
 
 
 def round_down(value, precision):

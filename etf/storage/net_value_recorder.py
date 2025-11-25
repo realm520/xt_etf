@@ -20,13 +20,13 @@ from tenacity import (
     retry_if_exception_type,
 )
 import os
-from dotenv import load_dotenv
 
 # 导入数据库模型
 from .models import NetValueHistory, NetValueEvent, Base
 
-# 加载环境变量
-load_dotenv()
+# 使用统一配置加载（会自动初始化环境变量）
+from etf.config import init_env
+init_env()
 
 logger = logging.getLogger(__name__)
 

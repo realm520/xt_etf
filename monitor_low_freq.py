@@ -12,7 +12,8 @@ from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from typing import Dict, List, Tuple
 import requests
-import yaml
+
+from etf.config import load_config
 
 
 class LowFrequencyMonitor:
@@ -20,9 +21,9 @@ class LowFrequencyMonitor:
 
     def __init__(self, config_file="config/strategies.yaml"):
         """初始化监控器"""
-        # 加载策略配置
-        with open(config_file, "r") as f:
-            self.strategies_config = yaml.safe_load(f)["strategies"]
+        # 使用统一配置加载器
+        config = load_config(config_file)
+        self.strategies_config = config.get("strategies", {})
 
         # Redis连接
         self.redis_client = redis.Redis(

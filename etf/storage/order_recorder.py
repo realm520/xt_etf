@@ -24,13 +24,13 @@ from tenacity import (
     wait_exponential,
     retry_if_exception_type,
 )
-from dotenv import load_dotenv
 
 # 导入数据库模型
 from .models import Order as OrderModel, Trade as TradeModel, Base
 
-# 加载环境变量
-load_dotenv()
+# 使用统一配置加载（会自动初始化环境变量）
+from etf.config import init_env
+init_env()
 
 # 设置日志
 logging.basicConfig(

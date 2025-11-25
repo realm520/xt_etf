@@ -21,27 +21,18 @@ sys.path.insert(0, str(project_root))
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.ext.asyncio import create_async_engine
-from dotenv import load_dotenv
 
-# 加载环境变量
-load_dotenv()
+# 使用统一配置加载
+from etf.config import init_env, get_db_url
+init_env()
 
 # 导入数据库模型
 from etf.storage.models import Base, NetValueHistory, NetValueEvent
 
 
 def get_database_url(async_mode=False):
-    """获取数据库连接URL"""
-    db_user = os.getenv("POSTGRES_USER", "postgres")
-    db_password = os.getenv("POSTGRES_PASSWORD", "postgres")
-    db_host = os.getenv("POSTGRES_HOST", "localhost")
-    db_port = os.getenv("POSTGRES_PORT", "5432")
-    db_name = os.getenv("POSTGRES_DB", "xt_etf")
-
-    if async_mode:
-        return f"postgresql+asyncpg://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
-    else:
-        return f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+    """获取数据库连接URL（使用统一配置）"""
+    return get_db_url(async_driver=async_mode)
 
 
 def check_tables_exist(engine):

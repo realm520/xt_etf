@@ -14,13 +14,13 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from dotenv import load_dotenv
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from etf.storage.models import Base
 
-# 加载环境变量
-load_dotenv()
+# 使用统一配置加载
+from etf.config import init_env, get_db_config
+init_env()
 
 # 配置日志
 logging.basicConfig(
