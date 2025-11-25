@@ -4,21 +4,72 @@ import time
 import math
 import logging
 import json
+import os
 import pandas as pd
+from pathlib import Path
 
 
-with open('APIKey.json', 'r', encoding='utf8') as input:
-    apikey = json.load(input)
-    api_key = apikey["bn"]["access_key"]
-    api_secret = apikey["bn"]["secret_key"]
+def _load_binance_keys():
+    """
+    加载 Binance API 密钥，支持多种方式（按优先级）：
+    1. 环境变量 BN_ACCESS_KEY / BN_SECRET_KEY
+    2. .env 文件中的 bn_access_key / bn_secret_key
+    3. APIKey.json 文件（兼容旧版）
+    """
+    # 尝试从 .env 加载
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
     
+    # 方式1: 环境变量
+    access_key = os.getenv("BN_ACCESS_KEY") or os.getenv("bn_access_key")
+    secret_key = os.getenv("BN_SECRET_KEY") or os.getenv("bn_secret_key")
+    
+    if access_key and secret_key:
+        logging.info("Binance API 密钥已从环境变量加载")
+        return access_key, secret_key
+    
+    # 方式2: APIKey.json 文件（兼容旧版）
+    api_key_paths = [
+        Path("APIKey.json"),
+        Path.home() / ".config" / "xt_etf" / "APIKey.json",
+        Path(__file__).parent / "APIKey.json",
+    ]
+    
+    for path in api_key_paths:
+        if path.exists():
+            try:
+                with open(path, 'r', encoding='utf8') as f:
+                    apikey = json.load(f)
+                    access_key = apikey.get("bn", {}).get("access_key")
+                    secret_key = apikey.get("bn", {}).get("secret_key")
+                    if access_key and secret_key:
+                        logging.info(f"Binance API 密钥已从 {path} 加载")
+                        return access_key, secret_key
+            except Exception as e:
+                logging.warning(f"读取 {path} 失败: {e}")
+    
+    # 未找到密钥
+    logging.warning("未找到 Binance API 密钥，对冲功能将不可用")
+    logging.warning("请设置环境变量 BN_ACCESS_KEY/BN_SECRET_KEY 或创建 APIKey.json")
+    return None, None
+
+
 def round_down(value, precision):
     factor = 10 ** precision
     return math.floor(value * factor) / factor
 
+
 class Hedge():
     def __init__(self):
-        self.client = Client(api_key, api_secret)
+        api_key, api_secret = _load_binance_keys()
+        if api_key and api_secret:
+            self.client = Client(api_key, api_secret)
+        else:
+            self.client = None
+            logging.warning("Hedge 初始化时未找到 API 密钥，对冲功能禁用")
         self.init_position = None
         self.position = 0
         self.sent_order = False
