@@ -14,7 +14,6 @@ import time
 import logging
 import threading
 import atexit
-import pandas as pd
 import argparse
 import yaml
 import os
@@ -59,23 +58,6 @@ class EtfStrategy:
             time.sleep(10)
         except Exception as e:
             pass
-        columns = [
-            "price",
-            "quantity",
-            "orderId",
-            "time",
-            "UTC_PLUS_8",
-            "symbol",
-            "side",
-            "state",
-        ]
-        df = pd.DataFrame(columns=columns)
-        df.to_csv(
-            market_maker.order_manager.open_orders_csv_file,
-            mode="w",
-            index=False,
-            header=True,
-        )
         logging.info("finish cancel_all_open_orders")
 
         # ═══════════════════════════════════════════════════════════
@@ -772,37 +754,32 @@ if __name__ == "__main__":
 
     # ===== 初始化 WebSocket 客户端（用于实时depth数据） =====
     ws_client = None
-    enable_websocket = os.getenv("ENABLE_WEBSOCKET", "true").lower() == "true"
+    try:
+        # 根据环境选择 WebSocket URL
+        if config["env"] == "qa":
+            ws_url = "wss://stream.xt-qa2.com/public"  # QA2 测试环境
+        else:
+            ws_url = "wss://stream.xt.com/public"     # 生产环境
 
-    if enable_websocket:
-        try:
-            # 根据环境选择 WebSocket URL
-            if config["env"] == "qa":
-                ws_url = "wss://stream.xt-qa2.com/public"  # QA2 测试环境
-            else:
-                ws_url = "wss://stream.xt.com/public"     # 生产环境
+        # XT public WebSocket 不需要认证，直接连接
+        ws_client = XTWebSocketClient(
+            symbol=config["symbol"],
+            ws_url=ws_url  # ✅ 传递环境相关的 URL
+        )
+        ws_client.start()
+        logging.info(f"✅ WebSocket客户端已启动: {config['symbol']} @ {ws_url}")
 
-            # XT public WebSocket 不需要认证，直接连接
-            ws_client = XTWebSocketClient(
-                symbol=config["symbol"],
-                ws_url=ws_url  # ✅ 传递环境相关的 URL
-            )
-            ws_client.start()
-            logging.info(f"✅ WebSocket客户端已启动: {config['symbol']} @ {ws_url}")
-
-            # 等待WebSocket连接建立（最多5秒）
-            for i in range(10):
-                if ws_client.is_connected():
-                    logging.info("✅ WebSocket连接成功")
-                    break
-                time.sleep(0.5)
-            else:
-                logging.warning("WebSocket连接未在5秒内建立，将fallback到REST API")
-        except Exception as e:
-            logging.warning(f"WebSocket初始化失败: {e}，将使用REST API")
-            ws_client = None
-    else:
-        logging.info("⏸️ WebSocket已禁用 (ENABLE_WEBSOCKET=false)")
+        # 等待WebSocket连接建立（最多5秒）
+        for i in range(10):
+            if ws_client.is_connected():
+                logging.info("✅ WebSocket连接成功")
+                break
+            time.sleep(0.5)
+        else:
+            logging.warning("WebSocket连接未在5秒内建立，将fallback到REST API")
+    except Exception as e:
+        logging.warning(f"WebSocket初始化失败: {e}，将使用REST API")
+        ws_client = None
 
     # ===== 初始化 Symbol 配置管理器（用于动态获取精度配置） =====
     symbol_config_manager = None
@@ -843,7 +820,14 @@ if __name__ == "__main__":
     # 传递策略名称和Symbol配置管理器给 OrderManager
     # 从配置中读取订单档位数量（layer），默认200（避免ORDER_006挂单过多错误）
     tier = config.get("orderbook_config", {}).get("layer", 200)
-    order_manager = OrderManager(spot, strategy_name=strategy_name, symbol_config=symbol_config_manager, tier=tier)
+    # ✅ OrderManager 默认启用订单/成交 WebSocket 推送
+    # 这样才能触发 _on_trade() 回调，记录成交到 trades 表
+    order_manager = OrderManager(
+        spot,
+        strategy_name=strategy_name,
+        symbol_config=symbol_config_manager,
+        tier=tier
+    )
     
     # 启用资金检查（如果配置中启用）
     balance_check_config = config.get("balance_check", {})
