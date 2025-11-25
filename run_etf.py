@@ -54,7 +54,7 @@ class EtfStrategy:
 
         logging.info("cancel_all_open_orders")        
         try:
-            order_manager.cancel_all_open_orders(config["symbol"])
+            market_maker.order_manager.cancel_all_open_orders(config["symbol"])
             time.sleep(10)
         except Exception as e:
             pass
@@ -156,7 +156,7 @@ class EtfStrategy:
                 if risk_controller.stop_loss_manager and config.get("currencies"):
                     try:
                         # 获取当前持仓信息
-                        delta_pos, position, mid_price, delta_amt = order_manager.get_position3(
+                        delta_pos, position, mid_price, delta_amt = market_maker.order_manager.get_position3(
                             config["symbol"], config["currencies"]
                         )
 
@@ -171,9 +171,9 @@ class EtfStrategy:
                             # 1. 首先检查 delta_amt 是否足够大，避免除以极小数
                             MIN_DELTA_AMT_THRESHOLD = 0.05  # 最小持仓量阈值，低于此值不计算入场价
 
-                            if order_manager.init_amount and order_manager.init_amount != 0 and abs(delta_amt) >= MIN_DELTA_AMT_THRESHOLD:
+                            if market_maker.order_manager.init_amount and market_maker.order_manager.init_amount != 0 and abs(delta_amt) >= MIN_DELTA_AMT_THRESHOLD:
                                 # delta_amt 足够大，可以安全计算入场价
-                                calculated_entry = (position - order_manager.init_amount * mid_price) / delta_amt
+                                calculated_entry = (position - market_maker.order_manager.init_amount * mid_price) / delta_amt
 
                                 # 2. 多重价格合理性检查
                                 # 检查1: 入场价必须为正数
@@ -191,7 +191,7 @@ class EtfStrategy:
                                             f"⚠️ 入场价偏差过大: calculated={calculated_entry:.4f}, "
                                             f"mid_price={mid_price:.4f}, deviation={price_deviation:.2%} (阈值30%), "
                                             f"delta_amt={delta_amt:.6f}, position={position:.2f}, "
-                                            f"init_amt={order_manager.init_amount:.2f}, 使用当前价作为入场价"
+                                            f"init_amt={market_maker.order_manager.init_amount:.2f}, 使用当前价作为入场价"
                                         )
                                         entry_price = mid_price  # 回退到安全值
                                     else:
