@@ -105,3 +105,6 @@ dump.rdb
 
 # 特定项目忽略
 pyrightconfig.json
+
+# Claude 生成的文档
+claudedocs/
