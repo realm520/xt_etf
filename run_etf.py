@@ -635,15 +635,43 @@ def main():
     if config["env"] == "qa":
         # QA 环境从 .env 文件读取 API 密钥
         import os
+        from pathlib import Path
         from dotenv import load_dotenv
         
-        load_dotenv()
+        # 显式查找 .env 文件
+        cwd = Path.cwd()
+        env_file = cwd / ".env"
+        
+        if env_file.exists():
+            load_dotenv(env_file)
+            logging.info(f"✅ 已加载 .env 文件: {env_file}")
+        else:
+            # 尝试从当前目录向上查找
+            load_dotenv()  # 使用默认查找
+            logging.warning(f"⚠️ 当前目录 {cwd} 未找到 .env 文件，使用默认查找")
+        
+        access_key = os.getenv("access_key")
+        secret_key = os.getenv("secret_key")
+        
+        if not access_key or not secret_key:
+            logging.error("=" * 70)
+            logging.error("🚨 错误: 未能从 .env 文件读取 API 密钥!")
+            logging.error(f"   当前工作目录: {cwd}")
+            logging.error(f"   .env 文件路径: {env_file}")
+            logging.error(f"   .env 文件存在: {env_file.exists()}")
+            logging.error("=" * 70)
+            logging.error("请确保 .env 文件包含以下内容:")
+            logging.error("   access_key=your_access_key")
+            logging.error("   secret_key=your_secret_key")
+            logging.error("=" * 70)
+            raise RuntimeError("QA 环境需要 .env 文件中的 API 密钥")
         
         spot = Spot(
             host="https://sapi.xt-qa2.com",  # XT QA2 测试环境
-            access_key=os.getenv("access_key"),
-            secret_key=os.getenv("secret_key"),
+            access_key=access_key,
+            secret_key=secret_key,
         )
+        logging.info(f"✅ QA 环境 API 密钥已加载 (access_key: {access_key[:4]}...)")
 
     elif config["env"] == "prod":
         # 使用安全的 API 密钥加载器 - 生产环境强制使用加密密钥
