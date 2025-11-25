@@ -1,0 +1,536 @@
+# ETF 策略配置文件
+# 保持所有参数值与原始文件完全一致
+
+strategies:
+  ton3l:
+    # 基础配置 - TON 3倍做多策略
+    prefix: "ton3l"
+    env: "qa"
+    clientOrderId: "1655"
+    apikey: "APIKey.json"
+    bnsymbol: "TONUSDT"
+    currencies: ["USDT", "TON3L", "TON3S"]
+
+    # 精度设置
+    precision: 6
+    prec_amount: 2
+    precision_amount: 0
+    precision_price: 4
+
+    # 时间间隔（秒）- 中低频优化
+    sleep_interval: 10       # 主循环间隔
+    Hedging_interval: 20
+    washing_lambda: 10       # ✅ 洗盘平均间隔（秒）→ 1/10 = 10%/秒 → 1分钟约6次（确保K线数据充足）
+    kline_continuity_interval: 60
+
+    # K线优化参数（新增）
+    kline_price_volatility: 0.001     # K线价格波动范围 ±0.1%
+    trend_switch_interval: 300        # 趋势切换间隔（秒） 5分钟
+    trend_up_prob: 0.15               # 上涨趋势概率 15%
+    trend_down_prob: 0.15             # 下跌趋势概率 15%
+    trend_oscillate_prob: 0.70        # 震荡概率 70%
+
+    # 分笔成交参数（方案3：最真实K线）
+    micro_trades_count: 4             # 每次洗盘的小单数量（默认随机3-5笔）
+
+    # 功能开关
+    Enable_risk_controller: false   # ❌ 临时禁用（已修复 Level 2 逻辑，待测试后启用）
+    Enable_wash_trading: true
+    Enable_hedging: false
+    Enable_market_making: true
+
+    # 交易参数
+    leverage: 3
+    wash: "mid_price"
+    anti_pin_usdt: 300
+    anti_pin_rate: 0.2
+    bid_ask_spread: 0.008    # 0.8% 价差
+
+    # 订单更新控制参数
+    price_change_threshold: 0.003  # 价格变化阈值 0.3%（减少不必要的订单更新）
+    min_update_interval: 30        # 最小更新间隔 30秒（防止过于频繁更新）
+
+    # ========== 订单簿算法配置 ==========
+    orderbook_algorithm: "layered"     # ✅ 使用分层订单簿算法（减少70%+ API调用）
+    orderbook_config:
+      total_budget: 10000.0            # 总预算 10000 USDT
+      layer: 200                       # 总档位200档（避免ORDER_006挂单过多错误）
+
+      # 3层订单簿配置（适合3x杠杆，按比例缩减至200档）
+      near_book:
+        distance_threshold: 0.005      # 近盘口：净值±0.5%
+        layer_count: 20                # 20档（买10 + 卖10）
+        price_tolerance: 0.001         # 价格匹配容差 0.1%
+        update_interval: 30            # 更新间隔 30秒
+        price_change_trigger: 0.002    # 触发阈值 0.2%
+        budget_ratio: 0.3              # 30%预算
+
+      transition_zone:
+        distance_range: [0.005, 0.02]  # 过渡区：0.5%-2%
+        layer_count: 60                # 60档（买30 + 卖30）
+        price_tolerance: 0.003         # 价格匹配容差 0.3%
+        update_interval: 60            # 更新间隔 60秒
+        price_change_trigger: 0.005    # 触发阈值 0.5%
+        budget_ratio: 0.4              # 40%预算
+
+      far_book:
+        distance_range: [0.02, 0.10]   # 远盘口：2%-10%
+        layer_count: 120               # 120档（买60 + 卖60）
+        price_tolerance: 0.01          # 价格匹配容差 1%
+        update_interval: 180           # 更新间隔 180秒
+        price_change_trigger: 0.01     # 触发阈值 1%
+        budget_ratio: 0.3              # 30%预算
+
+    # 净值计算参数
+    net_value_interval: 1    # 净值更新间隔（秒）
+    init_net_value: 1.0      # 初始净值
+    daily_fee: 0.001         # 日管理费率
+    rebalance_threshold: 0.05 # 再平衡阈值
+    max_single_change: 0.10  # 最大单次变化率限制
+    max_restart_gap: 300     # 最大重启间隔（秒）
+
+    # 止损配置
+    stop_loss:
+      enabled: true          # 是否启用止损
+      fixed_threshold: -0.02 # 固定止损阈值 -2%
+      trailing_stop: 0.01    # 移动止损 1%
+      time_stop: 24          # 时间止损（小时）
+      cooldown: 60           # 止损后冷却时间（分钟）
+      enable_partial_close: true  # 是否启用部分平仓
+
+    # 资金检查配置
+    balance_check:
+      enabled: true                   # 是否启用资金检查
+      warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
+      critical_threshold: 0.2         # 危急阈值（剩余资金比例20%）
+      insufficient_threshold: 0.1     # 不足阈值（剩余资金比例10%）
+      check_interval: 60              # 检查间隔（秒）
+
+
+  ton3s:
+    # 基础配置 - TON 3倍做空策略
+    prefix: "ton3s"
+    env: "qa"
+    clientOrderId: "1655"
+    apikey: "APIKey.json"
+    bnsymbol: "TONUSDT"
+    currencies: ["USDT", "TON3S", "TON3L"]
+
+    # 精度设置
+    precision: 6
+    prec_amount: 2
+    precision_amount: 0
+    precision_price: 4
+
+    # 时间间隔（秒）- 中低频优化
+    sleep_interval: 10       # 主循环间隔
+    Hedging_interval: 20
+    washing_lambda: 10       # ✅ 洗盘平均间隔（秒）→ 1/10 = 10%/秒 → 1分钟约6次（确保K线数据充足）
+    kline_continuity_interval: 60
+
+    # K线优化参数（新增）
+    kline_price_volatility: 0.001     # K线价格波动范围 ±0.1%
+    trend_switch_interval: 300        # 趋势切换间隔（秒） 5分钟
+    trend_up_prob: 0.15               # 上涨趋势概率 15%
+    trend_down_prob: 0.15             # 下跌趋势概率 15%
+    trend_oscillate_prob: 0.70        # 震荡概率 70%
+
+    # 分笔成交参数（方案3：最真实K线）
+    micro_trades_count: 4             # 每次洗盘的小单数量（默认随机3-5笔）
+
+    # 功能开关
+    Enable_risk_controller: false   # ❌ 临时禁用（已修复 Level 2 逻辑，待测试后启用）
+    Enable_wash_trading: true
+    Enable_hedging: false
+    Enable_market_making: true
+
+    # 交易参数
+    leverage: 3
+    wash: "mid_price"
+    anti_pin_usdt: 300
+    anti_pin_rate: 0.2
+    bid_ask_spread: 0.008    # 0.8% 价差
+
+    # 订单更新控制参数
+    price_change_threshold: 0.003  # 价格变化阈值 0.3%（减少不必要的订单更新）
+    min_update_interval: 30        # 最小更新间隔 30秒（防止过于频繁更新）
+
+    # ========== 订单簿算法配置 ==========
+    orderbook_algorithm: "layered"     # ✅ 使用分层订单簿算法（减少70%+ API调用）
+    orderbook_config:
+      total_budget: 10000.0            # 总预算 10000 USDT
+      layer: 200                       # 总档位200档（避免ORDER_006挂单过多错误）
+
+      # 3层订单簿配置（适合3x杠杆，按比例缩减至200档）
+      near_book:
+        distance_threshold: 0.005      # 近盘口：净值±0.5%
+        layer_count: 20                # 20档（买10 + 卖10）
+        price_tolerance: 0.001         # 价格匹配容差 0.1%
+        update_interval: 30            # 更新间隔 30秒
+        price_change_trigger: 0.002    # 触发阈值 0.2%
+        budget_ratio: 0.3              # 30%预算
+
+      transition_zone:
+        distance_range: [0.005, 0.02]  # 过渡区：0.5%-2%
+        layer_count: 60                # 60档（买30 + 卖30）
+        price_tolerance: 0.003         # 价格匹配容差 0.3%
+        update_interval: 60            # 更新间隔 60秒
+        price_change_trigger: 0.005    # 触发阈值 0.5%
+        budget_ratio: 0.4              # 40%预算
+
+      far_book:
+        distance_range: [0.02, 0.10]   # 远盘口：2%-10%
+        layer_count: 120               # 120档（买60 + 卖60）
+        price_tolerance: 0.01          # 价格匹配容差 1%
+        update_interval: 180           # 更新间隔 180秒
+        price_change_trigger: 0.01     # 触发阈值 1%
+        budget_ratio: 0.3              # 30%预算
+
+    # 净值计算参数
+    net_value_interval: 1    # 净值更新间隔（秒）
+    init_net_value: 1.0      # 初始净值
+    daily_fee: 0.001         # 日管理费率
+    rebalance_threshold: 0.05 # 再平衡阈值
+    max_single_change: 0.10  # 最大单次变化率限制
+    max_restart_gap: 300     # 最大重启间隔（秒）
+
+    # 止损配置
+    stop_loss:
+      enabled: true          # 是否启用止损
+      fixed_threshold: -0.02 # 固定止损阈值 -2%
+      trailing_stop: 0.01    # 移动止损 1%
+      time_stop: 24          # 时间止损（小时）
+      cooldown: 60           # 止损后冷却时间（分钟）
+      enable_partial_close: true  # 是否启用部分平仓
+
+    # 资金检查配置
+    balance_check:
+      enabled: true                   # 是否启用资金检查
+      warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
+      critical_threshold: 0.2         # 危急阈值（剩余资金比例20%）
+      insufficient_threshold: 0.1     # 不足阈值（剩余资金比例10%）
+      check_interval: 60              # 检查间隔（秒）
+
+  stg3l:
+    # 基础配置
+    prefix: "stg3l"
+    env: "qa"
+    clientOrderId: "1655"
+    apikey: "APIKey.json"
+    bnsymbol: "STGUSDT"
+    currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
+
+    # 精度设置
+    precision: 6
+    prec_amount: 2
+    precision_amount: 0
+    precision_price: 4
+
+    # 时间间隔（秒）- 中低频优化
+    sleep_interval: 10       # 主循环间隔 - 从5秒改为10秒
+    Hedging_interval: 20
+    washing_lambda: 30       # ✅ 洗盘平均间隔（秒）→ 1分钟约2次洗盘 × 4笔小单 = 8笔成交
+    kline_continuity_interval: 60
+
+    # 功能开关
+    Enable_risk_controller: false   # ❌ 临时禁用（已修复 Level 2 逻辑，待测试后启用）
+    Enable_wash_trading: true
+    Enable_hedging: false
+    Enable_market_making: true
+
+    # 交易参数
+    leverage: 5
+    wash: "mid_price"
+    anti_pin_usdt: 300
+    anti_pin_rate: 0.2
+    bid_ask_spread: 0.008    # 从1%改为0.8%，吸引真实交易
+
+    # ========== 订单簿算法配置 ==========
+    orderbook_algorithm: "natural"
+    orderbook_config:
+      total_budget: 10000.0
+      layer: 200                       # 200档（避免ORDER_006挂单过多错误）
+      extra_params:
+        naturalness: "high"
+
+    # 净值计算参数
+    net_value_interval: 1    # 净值更新间隔（秒）
+    init_net_value: 1.0      # 初始净值
+    daily_fee: 0.001         # 日管理费率
+    rebalance_threshold: 0.05 # 再平衡阈值
+    max_single_change: 0.10  # 最大单次变化率限制
+    max_restart_gap: 300     # 最大重启间隔（秒）
+    
+    # 止损配置
+    stop_loss:
+      enabled: true          # 是否启用止损
+      fixed_threshold: -0.02 # 固定止损阈值 -2%
+      trailing_stop: 0.01    # 移动止损 1%
+      time_stop: 24          # 时间止损（小时）
+      cooldown: 60           # 止损后冷却时间（分钟）
+      enable_partial_close: true  # 是否启用部分平仓
+
+    # 资金检查配置
+    balance_check:
+      enabled: true                   # 是否启用资金检查
+      warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
+      critical_threshold: 0.2         # 危急阈值（剩余资金比例20%）
+      insufficient_threshold: 0.1     # 不足阈值（剩余资金比例10%）
+      check_interval: 60              # 检查间隔（秒）
+
+  stg3s:
+    # 基础配置
+    prefix: "stg3s"
+    env: "prod"
+    clientOrderId: "1655"
+    apikey: "APIKey.json"
+    bnsymbol: "STGUSDT"
+    currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
+
+    # 精度设置
+    precision: 6
+    prec_amount: 2
+    precision_amount: 0
+    precision_price: 4
+
+    # 时间间隔（秒）- 中低频优化
+    sleep_interval: 10       # 主循环间隔 - 从1秒改为10秒
+    Hedging_interval: 20
+    washing_lambda: 30       # ✅ 洗盘平均间隔（秒）→ 1分钟约2次洗盘 × 4笔小单 = 8笔成交
+    kline_continuity_interval: 60
+
+    # 功能开关
+    Enable_risk_controller: false   # ❌ 临时禁用（已修复 Level 2 逻辑，待测试后启用）
+    Enable_wash_trading: true
+    Enable_hedging: false
+    Enable_market_making: true
+
+    # 交易参数
+    leverage: 5
+    wash: "mid_price"
+    anti_pin_usdt: 300
+    anti_pin_rate: 0.2
+    bid_ask_spread: 0.008    # 从1%改为0.8%，吸引真实交易
+
+    # ========== 订单簿算法配置 ==========
+    orderbook_algorithm: "natural"
+    orderbook_config:
+      total_budget: 10000.0
+      layer: 200                       # 200档（避免ORDER_006挂单过多错误）
+      extra_params:
+        naturalness: "high"
+
+    # 净值计算参数
+    net_value_interval: 1    # 净值更新间隔（秒）
+    init_net_value: 1.0      # 初始净值
+    daily_fee: 0.001         # 日管理费率
+    rebalance_threshold: 0.05 # 再平衡阈值
+    max_single_change: 0.10  # 最大单次变化率限制
+    max_restart_gap: 300     # 最大重启间隔（秒）
+
+    # 止损配置
+    stop_loss:
+      enabled: true          # 是否启用止损
+      fixed_threshold: -0.02 # 固定止损阈值 -2%
+      trailing_stop: 0.01    # 移动止损 1%
+      time_stop: 24          # 时间止损（小时）
+      cooldown: 60           # 止损后冷却时间（分钟）
+      enable_partial_close: true  # 是否启用部分平仓
+
+    # 资金检查配置
+    balance_check:
+      enabled: true                   # 是否启用资金检查
+      warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
+      critical_threshold: 0.2         # 危急阈值（剩余资金比例20%）
+      insufficient_threshold: 0.1     # 不足阈值（剩余资金比例10%）
+      check_interval: 60              # 检查间隔（秒）
+
+  stg5l:
+    # 基础配置
+    prefix: "stg5l"
+    env: "prod"
+    clientOrderId: "1655"
+    apikey: "APIKey.json"
+    bnsymbol: "STGUSDT"
+    currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
+
+    # 精度设置
+    precision: 6
+    prec_amount: 2
+    precision_amount: 0
+    precision_price: 4
+
+    # 时间间隔（秒）- 中低频优化
+    sleep_interval: 15       # 主循环间隔 - 从1秒改为15秒（高杠杆更谨慎）
+    Hedging_interval: 20
+    washing_lambda: 15       # ✅ 洗盘平均间隔（秒）→ 1分钟约4次洗盘 × 4笔小单 = 16笔成交
+    kline_continuity_interval: 60
+
+    # 功能开关
+    Enable_risk_controller: false   # ❌ 临时禁用（已修复 Level 2 逻辑，待测试后启用）
+    Enable_wash_trading: true
+    Enable_hedging: false
+    Enable_market_making: true
+
+    # 交易参数
+    leverage: 5
+    wash: "mid_price"
+    anti_pin_usdt: 300
+    anti_pin_rate: 0.2
+    bid_ask_spread: 0.015    # 从1%改为1.5%，高杠杆需要更大价差保护
+
+    # 订单更新控制参数
+    price_change_threshold: 0.005  # 价格变化阈值 0.5%（高杠杆更保守）
+    min_update_interval: 45        # 最小更新间隔 45秒（高杠杆更长冷却期）
+
+    # ========== 订单簿算法配置 ==========
+    orderbook_algorithm: "natural"
+    orderbook_config:
+      total_budget: 10000.0
+      layer: 200                       # 200档（避免ORDER_006挂单过多错误）
+      extra_params:
+        naturalness: "high"
+
+    # 净值计算参数
+    net_value_interval: 1    # 净值更新间隔（秒）
+    init_net_value: 1.0      # 初始净值
+    daily_fee: 0.001         # 日管理费率
+    rebalance_threshold: 0.05 # 再平衡阈值
+    max_single_change: 0.10  # 最大单次变化率限制
+    max_restart_gap: 300     # 最大重启间隔（秒）
+    
+    # 止损配置 - 5x杠杆做多，更严格的止损
+    stop_loss:
+      enabled: true          # 是否启用止损
+      fixed_threshold: -0.015 # 固定止损阈值 -1.5% (5x杠杆更严格)
+      trailing_stop: 0.008    # 移动止损 0.8%
+      time_stop: 12          # 时间止损 12小时（高杠杆缩短持仓时间）
+      cooldown: 60           # 止损后冷却时间（分钟）
+      enable_partial_close: true  # 是否启用部分平仓
+
+    # 资金检查配置
+    balance_check:
+      enabled: true                   # 是否启用资金检查
+      warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
+      critical_threshold: 0.2         # 危急阈值（剩余资金比例20%）
+      insufficient_threshold: 0.1     # 不足阈值（剩余资金比例10%）
+      check_interval: 60              # 检查间隔（秒）
+
+  stg5s:
+    # 基础配置
+    prefix: "stg5s"
+    env: "prod"
+    clientOrderId: "1655"
+    apikey: "APIKey.json"
+    bnsymbol: "STGUSDT"
+    currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
+
+    # 精度设置
+    precision: 6
+    prec_amount: 2
+    precision_amount: 0
+    precision_price: 4
+
+    # 时间间隔（秒）- 中低频优化
+    sleep_interval: 15       # 主循环间隔 - 从1秒改为15秒（高杠杆更谨慎）
+    Hedging_interval: 20
+    washing_lambda: 15       # ✅ 洗盘平均间隔（秒）→ 1分钟约4次洗盘 × 4笔小单 = 16笔成交
+    kline_continuity_interval: 60
+
+    # 功能开关
+    Enable_risk_controller: false   # ❌ 临时禁用（已修复 Level 2 逻辑，待测试后启用）
+    Enable_wash_trading: true
+    Enable_hedging: false
+    Enable_market_making: true
+
+    # 交易参数
+    leverage: 5
+    wash: "mid_price"
+    anti_pin_usdt: 300
+    anti_pin_rate: 0.2
+    bid_ask_spread: 0.05    # STG5S 特有：保持5%价差（做空风险更高）
+
+    # 订单更新控制参数
+    price_change_threshold: 0.005  # 价格变化阈值 0.5%（做空风险最高，更保守）
+    min_update_interval: 60        # 最小更新间隔 60秒（做空风险高，最长冷却期）
+
+    # ========== 订单簿算法配置 ==========
+    orderbook_algorithm: "natural"
+    orderbook_config:
+      total_budget: 10000.0
+      layer: 200                       # 200档（避免ORDER_006挂单过多错误）
+      extra_params:
+        naturalness: "high"
+
+    # 净值计算参数
+    net_value_interval: 1    # 净值更新间隔（秒）
+    init_net_value: 1.0      # 初始净值
+    daily_fee: 0.001         # 日管理费率
+    rebalance_threshold: 0.05 # 再平衡阈值
+    max_single_change: 0.10  # 最大单次变化率限制
+    max_restart_gap: 300     # 最大重启间隔（秒）
+
+    # 止损配置 - 5x杠杆做空，最严格的止损（做空风险最高）
+    stop_loss:
+      enabled: true          # 是否启用止损
+      fixed_threshold: -0.01 # 固定止损阈值 -1% (做空风险最高，最严格)
+      trailing_stop: 0.005   # 移动止损 0.5%
+      time_stop: 8           # 时间止损 8小时（做空风险高，更短持仓时间）
+      cooldown: 60           # 止损后冷却时间（分钟）
+      enable_partial_close: true  # 是否启用部分平仓
+
+    # 资金检查配置
+    balance_check:
+      enabled: true                   # 是否启用资金检查
+      warning_threshold: 0.3          # 警告阈值（剩余资金比例30%）
+      critical_threshold: 0.2         # 危急阈值（剩余资金比例20%）
+      insufficient_threshold: 0.1     # 不足阈值（剩余资金比例10%）
+      check_interval: 60              # 检查间隔（秒）
+
+# ========================================
+# 全局配置
+# ========================================
+
+# 净值推送配置（推送到交易所）
+net_value_push:
+  enabled: true            # 全局开关：是否启用推送到交易所（默认关闭）
+  interval: 60              # 推送间隔（秒），建议60秒
+  retry_count: 3            # 推送失败重试次数
+  retry_backoff: true       # 启用指数退避重试（1s, 2s, 4s）
+  
+  # 环境配置（根据 --env 参数自动选择）
+  environments:
+    qa:
+      host: "https://sapi.xt-qa2.com"
+    prod:
+      host: "https://sapi.xt.com"
+  
+  # 策略Symbol映射（可选，不填则自动生成）
+  # 格式: 策略名 -> 交易所Symbol名称
+  symbol_mapping:
+    ton3l: "TON3L_USDT"
+    ton3s: "TON3S_USDT"
+    stg3l: "STG3L_USDT"
+    stg3s: "STG3S_USDT"
+    stg5l: "STG5L_USDT"
+    stg5s: "STG5S_USDT"
+
+# 数据库持久化配置
+database:
+  # PostgreSQL 连接配置（通过环境变量设置）
+  # POSTGRES_USER: postgres
+  # POSTGRES_PASSWORD: your_password
+  # POSTGRES_HOST: localhost
+  # POSTGRES_PORT: 5432
+  # POSTGRES_DB: xt_etf
+
+  # 净值持久化配置
+  net_value_persistence:
+    enabled: true           # 启用数据库持久化（默认禁用，策略上线前启用）
+    batch_size: 40          # 批量大小（4策略 × 10秒 = 40条/批）
+    flush_interval: 10      # 刷新间隔（秒）
+    enable_partitioning: false  # 启用月度分区（生产环境推荐）
+
+  # 订单记录器配置（已有）
+  order_persistence:
+    enabled: false          # 当前使用CSV降级（TODO: 实施PostgreSQL集成）
