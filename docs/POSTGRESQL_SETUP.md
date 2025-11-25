@@ -267,17 +267,12 @@ python run_etf.py --strategy stg3l --env qa
 - 最多重试3次
 - 自动处理临时连接问题
 
-### 3. CSV降级方案
-- 数据库不可用时自动降级到CSV
-- 数据保存在 `logs/order_records/`
-- 恢复后可手动导入到数据库
-
-### 4. 重复数据处理
+### 3. 重复数据处理
 - 自动检测唯一性约束冲突
 - 遇到重复订单时自动跳过
 - 不影响后续数据写入
 
-### 5. 统计信息
+### 4. 统计信息
 ```python
 from etf.storage import get_order_recorder
 
@@ -291,7 +286,6 @@ stats = recorder.get_stats()
 #   'wash_orders': 870,
 #   'db_write_success': 1200,
 #   'db_write_failed': 5,
-#   'csv_fallback_count': 45,
 #   'db_available': True,
 #   'queue_sizes': {'orders': 2, 'trades': 0}
 # }
@@ -371,19 +365,6 @@ ModuleNotFoundError: No module named 'asyncpg'
 ```bash
 uv pip install asyncpg tenacity python-dotenv
 ```
-
-### Q5: CSV降级模式
-
-如果数据库暂时不可用，系统会自动使用CSV降级：
-
-```
-📝 降级写入 10 条订单记录到CSV: orders_20250116.csv
-```
-
-**恢复方案**:
-1. 修复数据库问题
-2. 重启系统（自动恢复到PostgreSQL模式）
-3. 手动导入CSV数据（可选）
 
 ---
 

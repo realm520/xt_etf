@@ -46,13 +46,40 @@ strategies:
     anti_pin_rate: 0.2
     bid_ask_spread: 0.008    # 0.8% 价差
 
+    # 订单更新控制参数
+    price_change_threshold: 0.003  # 价格变化阈值 0.3%（减少不必要的订单更新）
+    min_update_interval: 30        # 最小更新间隔 30秒（防止过于频繁更新）
+
     # ========== 订单簿算法配置 ==========
-    orderbook_algorithm: "natural"     # 使用自然盘口算法
+    orderbook_algorithm: "layered"     # ✅ 使用分层订单簿算法（减少70%+ API调用）
     orderbook_config:
       total_budget: 10000.0            # 总预算 10000 USDT
-      layer: 500                       # 总档位500档（买250 + 卖250，对称）
-      extra_params:
-        naturalness: "high"            # 高自然度（95%真实性）
+      layer: 200                       # 总档位200档（避免ORDER_006挂单过多错误）
+
+      # 3层订单簿配置（适合3x杠杆，按比例缩减至200档）
+      near_book:
+        distance_threshold: 0.005      # 近盘口：净值±0.5%
+        layer_count: 20                # 20档（买10 + 卖10）
+        price_tolerance: 0.001         # 价格匹配容差 0.1%
+        update_interval: 30            # 更新间隔 30秒
+        price_change_trigger: 0.002    # 触发阈值 0.2%
+        budget_ratio: 0.3              # 30%预算
+
+      transition_zone:
+        distance_range: [0.005, 0.02]  # 过渡区：0.5%-2%
+        layer_count: 60                # 60档（买30 + 卖30）
+        price_tolerance: 0.003         # 价格匹配容差 0.3%
+        update_interval: 60            # 更新间隔 60秒
+        price_change_trigger: 0.005    # 触发阈值 0.5%
+        budget_ratio: 0.4              # 40%预算
+
+      far_book:
+        distance_range: [0.02, 0.10]   # 远盘口：2%-10%
+        layer_count: 120               # 120档（买60 + 卖60）
+        price_tolerance: 0.01          # 价格匹配容差 1%
+        update_interval: 180           # 更新间隔 180秒
+        price_change_trigger: 0.01     # 触发阈值 1%
+        budget_ratio: 0.3              # 30%预算
 
     # 净值计算参数
     net_value_interval: 1    # 净值更新间隔（秒）
@@ -124,13 +151,40 @@ strategies:
     anti_pin_rate: 0.2
     bid_ask_spread: 0.008    # 0.8% 价差
 
+    # 订单更新控制参数
+    price_change_threshold: 0.003  # 价格变化阈值 0.3%（减少不必要的订单更新）
+    min_update_interval: 30        # 最小更新间隔 30秒（防止过于频繁更新）
+
     # ========== 订单簿算法配置 ==========
-    orderbook_algorithm: "natural"     # 使用自然盘口算法
+    orderbook_algorithm: "layered"     # ✅ 使用分层订单簿算法（减少70%+ API调用）
     orderbook_config:
       total_budget: 10000.0            # 总预算 10000 USDT
-      layer: 500                       # 总档位500档（买250 + 卖250，对称）
-      extra_params:
-        naturalness: "high"            # 高自然度（95%真实性）
+      layer: 200                       # 总档位200档（避免ORDER_006挂单过多错误）
+
+      # 3层订单簿配置（适合3x杠杆，按比例缩减至200档）
+      near_book:
+        distance_threshold: 0.005      # 近盘口：净值±0.5%
+        layer_count: 20                # 20档（买10 + 卖10）
+        price_tolerance: 0.001         # 价格匹配容差 0.1%
+        update_interval: 30            # 更新间隔 30秒
+        price_change_trigger: 0.002    # 触发阈值 0.2%
+        budget_ratio: 0.3              # 30%预算
+
+      transition_zone:
+        distance_range: [0.005, 0.02]  # 过渡区：0.5%-2%
+        layer_count: 60                # 60档（买30 + 卖30）
+        price_tolerance: 0.003         # 价格匹配容差 0.3%
+        update_interval: 60            # 更新间隔 60秒
+        price_change_trigger: 0.005    # 触发阈值 0.5%
+        budget_ratio: 0.4              # 40%预算
+
+      far_book:
+        distance_range: [0.02, 0.10]   # 远盘口：2%-10%
+        layer_count: 120               # 120档（买60 + 卖60）
+        price_tolerance: 0.01          # 价格匹配容差 1%
+        update_interval: 180           # 更新间隔 180秒
+        price_change_trigger: 0.01     # 触发阈值 1%
+        budget_ratio: 0.3              # 30%预算
 
     # 净值计算参数
     net_value_interval: 1    # 净值更新间隔（秒）
@@ -175,7 +229,7 @@ strategies:
     # 时间间隔（秒）- 中低频优化
     sleep_interval: 10       # 主循环间隔 - 从5秒改为10秒
     Hedging_interval: 20
-    washing_interval: 30     # 洗盘间隔 - 从5秒改为30秒，减少自成交
+    washing_lambda: 30       # ✅ 洗盘平均间隔（秒）→ 1分钟约2次洗盘 × 4笔小单 = 8笔成交
     kline_continuity_interval: 60
 
     # 功能开关
@@ -195,7 +249,7 @@ strategies:
     orderbook_algorithm: "natural"
     orderbook_config:
       total_budget: 10000.0
-      layer: 500
+      layer: 200                       # 200档（避免ORDER_006挂单过多错误）
       extra_params:
         naturalness: "high"
 
@@ -242,7 +296,7 @@ strategies:
     # 时间间隔（秒）- 中低频优化
     sleep_interval: 10       # 主循环间隔 - 从1秒改为10秒
     Hedging_interval: 20
-    washing_interval: 30     # 洗盘间隔 - 从1秒改为30秒，减少自成交
+    washing_lambda: 30       # ✅ 洗盘平均间隔（秒）→ 1分钟约2次洗盘 × 4笔小单 = 8笔成交
     kline_continuity_interval: 60
 
     # 功能开关
@@ -262,7 +316,7 @@ strategies:
     orderbook_algorithm: "natural"
     orderbook_config:
       total_budget: 10000.0
-      layer: 500
+      layer: 200                       # 200档（避免ORDER_006挂单过多错误）
       extra_params:
         naturalness: "high"
 
@@ -309,7 +363,7 @@ strategies:
     # 时间间隔（秒）- 中低频优化
     sleep_interval: 15       # 主循环间隔 - 从1秒改为15秒（高杠杆更谨慎）
     Hedging_interval: 20
-    washing_interval: 60     # 洗盘间隔 - 从1秒改为60秒，大幅减少自成交
+    washing_lambda: 15       # ✅ 洗盘平均间隔（秒）→ 1分钟约4次洗盘 × 4笔小单 = 16笔成交
     kline_continuity_interval: 60
 
     # 功能开关
@@ -325,11 +379,15 @@ strategies:
     anti_pin_rate: 0.2
     bid_ask_spread: 0.015    # 从1%改为1.5%，高杠杆需要更大价差保护
 
+    # 订单更新控制参数
+    price_change_threshold: 0.005  # 价格变化阈值 0.5%（高杠杆更保守）
+    min_update_interval: 45        # 最小更新间隔 45秒（高杠杆更长冷却期）
+
     # ========== 订单簿算法配置 ==========
     orderbook_algorithm: "natural"
     orderbook_config:
       total_budget: 10000.0
-      layer: 500
+      layer: 200                       # 200档（避免ORDER_006挂单过多错误）
       extra_params:
         naturalness: "high"
 
@@ -376,7 +434,7 @@ strategies:
     # 时间间隔（秒）- 中低频优化
     sleep_interval: 15       # 主循环间隔 - 从1秒改为15秒（高杠杆更谨慎）
     Hedging_interval: 20
-    washing_interval: 60     # 洗盘间隔 - 从1秒改为60秒，大幅减少自成交
+    washing_lambda: 15       # ✅ 洗盘平均间隔（秒）→ 1分钟约4次洗盘 × 4笔小单 = 16笔成交
     kline_continuity_interval: 60
 
     # 功能开关
@@ -392,11 +450,15 @@ strategies:
     anti_pin_rate: 0.2
     bid_ask_spread: 0.05    # STG5S 特有：保持5%价差（做空风险更高）
 
+    # 订单更新控制参数
+    price_change_threshold: 0.005  # 价格变化阈值 0.5%（做空风险最高，更保守）
+    min_update_interval: 60        # 最小更新间隔 60秒（做空风险高，最长冷却期）
+
     # ========== 订单簿算法配置 ==========
     orderbook_algorithm: "natural"
     orderbook_config:
       total_budget: 10000.0
-      layer: 500
+      layer: 200                       # 200档（避免ORDER_006挂单过多错误）
       extra_params:
         naturalness: "high"
 

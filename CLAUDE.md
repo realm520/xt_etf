@@ -452,6 +452,9 @@ ENABLE_WEBSOCKET=true
 
 # 日志配置（可选）
 LOG_LEVEL=INFO
+
+# 退出行为配置（可选）
+CANCEL_ORDERS_ON_EXIT=true  # true: 退出时撤单, false: 保留订单
 ```
 
 **优势**:
@@ -485,6 +488,60 @@ LOG_LEVEL=INFO
 - Integration tests for exchange connectivity
 - Mock WebSocket servers for testing real-time features
 - Async test support throughout
+
+## Graceful Shutdown（优雅退出机制）
+
+程序退出时会执行以下步骤，确保安全和数据完整性：
+
+### 退出流程
+
+1. **停止洗盘交易**（如果启用）
+   - 设置停止标志，阻止新的洗盘交易
+   - 等待当前交易完成（最多60秒）
+   - 确保不会在交易执行中途被打断
+
+2. **清理系统资源**
+   - 清理Redis初始化标志
+   - 停止Symbol配置管理器自动刷新
+   - 关闭WebSocket连接
+   - 停止稳定性监控
+
+3. **订单处理**（可配置）
+   - 根据环境变量 `CANCEL_ORDERS_ON_EXIT` 决定是否撤单
+   - `true`（默认）: 撤销所有挂单，清空订单簿
+   - `false`: 保留做市订单，让它们继续工作
+
+### 环境变量配置
+
+```bash
+# 退出时撤销所有订单（默认行为）
+export CANCEL_ORDERS_ON_EXIT=true
+
+# 退出时保留订单（适合需要保持做市的场景）
+export CANCEL_ORDERS_ON_EXIT=false
+```
+
+### 使用场景
+
+**撤单模式** (`CANCEL_ORDERS_ON_EXIT=true`):
+- 适合日常维护、升级、重启
+- 确保没有悬空订单
+- 避免意外成交
+
+**保留订单模式** (`CANCEL_ORDERS_ON_EXIT=false`):
+- 适合短暂重启（如配置热更新）
+- 保持市场流动性
+- 减少订单簿重建时间
+
+### 触发方式
+
+程序退出会自动执行清理流程，无需手动操作：
+- Ctrl+C（SIGINT）
+- `kill` 命令（SIGTERM）
+- PM2 stop/restart
+- 系统关机
+
+**注意**: 使用 `kill -9`（SIGKILL）会跳过清理流程，可能导致订单残留。
 
 ## Important Considerations
 

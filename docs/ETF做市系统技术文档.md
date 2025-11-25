@@ -252,39 +252,33 @@ def get_position2(self, symbol):
 
 #### 方法3: 混合模式 (`get_position`)
 
-结合订单轮询和本地CSV缓存，提高计算准确性和性能。
+结合订单轮询和内存缓存，提高计算准确性和性能。
 
 ### 4. 订单状态持久化
 
-系统使用CSV文件持久化订单状态：
+系统使用 PostgreSQL 数据库持久化订单和成交数据：
 
-- **xt_open_orders.csv**: 当前活跃订单
-- **xt_history_orders.csv**: 历史成交和撤单记录
-- **xt_trading_history.csv**: 交易历史详情
+- **orders 表**: 所有订单记录（创建、更新、取消）
+- **trades 表**: 成交记录详情
 
-**写入逻辑** (`etf/order_manager.py:195-230`):
+**持久化架构** (`etf/storage/order_recorder.py`):
 
 ```python
-def write_orders(self):
-    # 1. 加载本地CSV
-    data = self.read_orders()
-
-    # 2. 移除已成交和已撤销订单
-    local_data = [
-        item for item in data
-        if str(item["orderId"]) not in (filled_orders + canceled_orders)
-    ]
-
-    # 3. 添加新订单
-    new_data = local_data + [
-        order for order in self.open_orders.values()
-        if str(order["orderId"]) not in existing_ids
-    ]
-
-    # 4. 写入CSV
-    df = pd.DataFrame(new_data)
-    df.to_csv(self.open_orders_csv_file, mode='w', index=False, header=True)
+# OrderRecorder 负责异步批量写入数据库
+class OrderRecorder:
+    async def record_order(self, order_data: Dict):
+        """记录订单到队列，由后台线程批量写入"""
+        self.order_queue.put_nowait(order_data)
+        
+    async def record_trade(self, trade_data: Dict):
+        """记录成交到队列，由后台线程批量写入"""
+        self.trade_queue.put_nowait(trade_data)
 ```
+
+**状态管理** (`etf/order_state_manager.py`):
+- 统一管理所有订单状态变更
+- 自动触发数据库持久化
+- 线程安全的内存缓存同步
 
 ---
 
@@ -795,7 +789,7 @@ graph TB
     end
 
     subgraph "持久化"
-        L[CSV Files<br/>订单记录]
+        L[PostgreSQL<br/>订单记录]
     end
 
     A -->|标的价格| C
@@ -831,7 +825,7 @@ graph TB
 
 2. **订单数据流**:
    ```
-   Redis净值 → Orderbook生成 → MarketMaker调整 → OrderManager执行 → CSV持久化
+   Redis净值 → Orderbook生成 → MarketMaker调整 → OrderManager执行 → PostgreSQL持久化
    ```
 
 3. **风险数据流**:
