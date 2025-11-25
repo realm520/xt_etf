@@ -307,76 +307,11 @@ def str2bool(v):
         raise argparse.ArgumentTypeError("Boolean value expected.")
 
 
-def _find_config_file(config_file="config/strategies.yaml"):
-    """查找配置文件路径
-    
-    查找顺序：
-    1. 当前目录的 config/strategies.yaml
-    2. 包内的 etf/config/strategies.yaml
-    """
-    # 1. 首先检查当前目录
-    if os.path.exists(config_file):
-        return config_file
-    
-    # 2. 尝试从包内查找配置文件
-    try:
-        try:
-            from importlib.resources import files
-            pkg_config = files("etf").joinpath("config", "strategies.yaml")
-            if pkg_config.is_file():
-                return str(pkg_config)
-        except (ImportError, AttributeError, TypeError):
-            # Python 3.8 降级方案
-            import pkg_resources as pkg_res
-            config_path = pkg_res.resource_filename("etf", "config/strategies.yaml")
-            if os.path.exists(config_path):
-                return config_path
-    except Exception:
-        pass
-    
-    return None
-
-
-def load_strategy_config(strategy_name, config_file="config/strategies.yaml"):
-    """加载策略配置文件
-    
-    查找顺序：
-    1. 当前目录的 config/strategies.yaml（向后兼容）
-    2. 包内的 etf/config/strategies.yaml（uvx 安装时使用）
-    """
-    config_path = _find_config_file(config_file)
-    
-    if config_path is None:
-        logging.warning(f"Config file {config_file} not found, using defaults")
-        return {}
-
-    try:
-        with open(config_path, "r", encoding="utf8") as f:
-            config_data = yaml.safe_load(f)
-
-        if strategy_name in config_data.get("strategies", {}):
-            logging.info(f"成功加载策略配置: {strategy_name} (from {config_path})")
-            return config_data["strategies"][strategy_name]
-        else:
-            logging.warning(f"Strategy {strategy_name} not found in config file")
-            return {}
-    except Exception as e:
-        logging.error(f"Error loading config file: {e}")
-        return {}
-
-
-def get_available_strategies(config_file="config/strategies.yaml"):
-    """从配置文件动态获取所有可用策略"""
-    config_path = _find_config_file(config_file)
-    if config_path is None:
-        return []
-    try:
-        with open(config_path, "r", encoding="utf8") as f:
-            config_data = yaml.safe_load(f)
-        return list(config_data.get("strategies", {}).keys())
-    except Exception as e:
-        logging.error(f"Error loading strategies from config: {e}")
-        return []
+# 使用共享的配置加载模块
+from etf.config.loader import (
+    load_strategy_config,
+    get_available_strategies,
+)
 
 
 def get_parser():

@@ -30,35 +30,12 @@ logging.basicConfig(
 )
 
 
-def load_config(config_file: str = "config/strategies.yaml") -> Dict[str, Any]:
-    """加载完整配置文件（包括策略和全局配置）"""
-    if not os.path.exists(config_file):
-        logging.error(f"配置文件 {config_file} 不存在")
-        sys.exit(1)
-
-    with open(config_file, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-
-    return config
-
-
-def load_strategy_config(
-    strategy_name: str, config_file: str = "config/strategies.yaml"
-) -> Dict[str, Any]:
-    """加载策略配置文件"""
-    config = load_config(config_file)
-
-    if "strategies" not in config or strategy_name not in config["strategies"]:
-        logging.error(f"策略 {strategy_name} 在配置文件中不存在")
-        sys.exit(1)
-
-    return config["strategies"][strategy_name]
-
-
-def get_available_strategies(config_file: str = "config/strategies.yaml") -> list:
-    """从配置文件动态获取所有可用策略"""
-    config = load_config(config_file)
-    return list(config.get("strategies", {}).keys())
+# 使用共享的配置加载模块
+from etf.config.loader import (
+    load_config,
+    load_strategy_config,
+    get_available_strategies,
+)
 
 
 def get_strategy_params(strategy_name: str) -> Dict[str, Any]:
