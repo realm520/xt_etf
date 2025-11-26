@@ -549,7 +549,7 @@ class ImprovedNetValue:
         net_value_after_fee = net_value * (1 - self.time_gap_fee)
         fee_amount = net_value - net_value_after_fee
         self.net_value_data["total_fee_deducted"] += self.time_gap_fee
-        logger.debug(f"扣除管理费: {fee_amount:.6f}, 费率: {self.time_gap_fee:.6f}")
+        logger.debug(f"扣除管理费: {fee_amount:.2e}, 费率: {self.time_gap_fee:.2e}")
         return net_value_after_fee
 
     def _push_net_value_to_exchange(self, net_value: float, retry_count: int = 3) -> bool:

@@ -65,10 +65,16 @@ class NaturalAlgorithm(OrderbookAlgorithm):
         # 获取自然度级别
         naturalness = self.config.extra_params.get("naturalness", "high")
 
-        # 计算买卖档位分配
+        # 计算买卖档位分配（确保买卖对称）
         n = self.config.layer
         n_bid = n // 2
         n_ask = n - n_bid
+        
+        # ✅ 买卖平衡检查
+        if abs(n_bid - n_ask) > 1:
+            logging.warning(
+                f"⚠️ 订单簿生成不平衡: BID={n_bid}, ASK={n_ask}, 总层={n}"
+            )
 
         # 记录关键参数（调试用）
         import logging

@@ -77,7 +77,7 @@ class OrderExecutor:
         strategy_name: str,
         max_layer: Optional[int] = None,  # 新增：最大档位数（用于订单数量保护）
         logger: Optional[logging.Logger] = None,
-        stats_print_interval: int = 10,  # 统计打印间隔（每N次execute_orderbook_update打印一次）
+        stats_print_interval: float = 10.0,  # 统计打印间隔（秒）
     ):
         self.order_manager = order_manager
         self.symbol = symbol
@@ -88,9 +88,9 @@ class OrderExecutor:
         # 记录当前周期的反针对订单ID
         self.current_anti_pin_order_ids: List[str] = []
 
-        # 订单统计打印控制
-        self.stats_print_interval = stats_print_interval
-        self._stats_print_counter = 0
+        # 订单统计打印控制（基于时间）
+        self.stats_print_interval = stats_print_interval  # 打印间隔（秒）
+        self._last_stats_print_time: float = 0.0  # 上次打印时间
 
     def execute_orderbook_update(
         self,
@@ -157,6 +157,27 @@ class OrderExecutor:
 
         # === 0.5 定期打印订单详细统计 ===
         self.print_order_stats(current_orders)
+
+        # === 0.6 买卖平衡检查和修正 ===
+        detailed_stats = self._count_orders_by_type_and_side(current_orders)
+        current_buy = sum(stats["BUY"] for stats in detailed_stats.values())
+        current_sell = sum(stats["SELL"] for stats in detailed_stats.values())
+        current_total = current_buy + current_sell
+        
+        if current_total > 0:
+            imbalance = abs(current_buy - current_sell) / current_total
+            if imbalance > 0.2:  # 不平衡度超过20%
+                self.logger.warning(
+                    f"⚠️ 买卖订单不平衡: BUY={current_buy}, SELL={current_sell}, "
+                    f"不平衡度={imbalance:.1%}"
+                )
+                
+                # 统计目标订单的买卖分布
+                target_buy = sum(1 for o in target_orders if o.get("direction") == "bid")
+                target_sell = sum(1 for o in target_orders if o.get("direction") == "ask")
+                self.logger.info(
+                    f"📊 目标订单分布: BUY={target_buy}, SELL={target_sell}"
+                )
 
         # === 1. 订单匹配分析 ===
         optimized_add_orders, optimized_cancel_orders = self._match_orders(
@@ -417,36 +438,90 @@ class OrderExecutor:
         current_orders: List[Dict[str, Any]],
         force: bool = False
     ) -> None:
-        """定期打印未结束订单的统计信息
+        """定期打印未结束订单的统计信息（基于时间间隔）
 
         Args:
             current_orders: 当前挂单列表
-            force: 是否强制打印（忽略间隔计数器）
+            force: 是否强制打印（忽略时间间隔）
         """
-        self._stats_print_counter += 1
+        import time as time_module
 
-        # 检查是否应该打印（达到间隔或强制）
-        if not force and self._stats_print_counter < self.stats_print_interval:
+        current_time = time_module.time()
+
+        # 检查是否应该打印（达到时间间隔或强制）
+        if not force and (current_time - self._last_stats_print_time) < self.stats_print_interval:
             return
 
-        # 重置计数器
-        self._stats_print_counter = 0
+        # 更新上次打印时间
+        self._last_stats_print_time = current_time
 
         # 获取详细统计
         detailed_stats = self._count_orders_by_type_and_side(current_orders)
 
-        # 计算总数
-        total_orders = sum(stats["total"] for stats in detailed_stats.values())
-        total_buy = sum(stats["BUY"] for stats in detailed_stats.values())
-        total_sell = sum(stats["SELL"] for stats in detailed_stats.values())
+        # 计算本地订单总数
+        local_total = sum(stats["total"] for stats in detailed_stats.values())
+        local_buy = sum(stats["BUY"] for stats in detailed_stats.values())
+        local_sell = sum(stats["SELL"] for stats in detailed_stats.values())
+
+        # 查询交易所实际订单数
+        exchange_total = 0
+        exchange_buy = 0
+        exchange_sell = 0
+        exchange_status = "OK"
+
+        try:
+            exchange_orders = self.order_manager.client.get_open_orders(symbol=self.symbol)
+            exchange_total = len(exchange_orders)
+            for order in exchange_orders:
+                if order.get("side") == "BUY":
+                    exchange_buy += 1
+                else:
+                    exchange_sell += 1
+        except Exception as e:
+            exchange_status = f"查询失败: {str(e)[:30]}"
+
+        # 计算本地与交易所差异
+        diff_total = local_total - exchange_total
+        diff_indicator = ""
+        if diff_total > 0:
+            diff_indicator = f" ⚠️+{diff_total}"
+        elif diff_total < 0:
+            diff_indicator = f" ⚠️{diff_total}"
+
+        # 计算买卖不平衡度
+        buy_sell_diff = abs(local_buy - local_sell)
+        imbalance_ratio = buy_sell_diff / max(local_total, 1) * 100
+        imbalance_indicator = ""
+        if imbalance_ratio > 20:  # 不平衡度超过20%
+            imbalance_indicator = f" ⚠️不平衡{imbalance_ratio:.0f}%"
+        elif imbalance_ratio > 10:  # 不平衡度超过10%
+            imbalance_indicator = f" 📊偏差{imbalance_ratio:.0f}%"
 
         # 构建打印内容
         logging.info(
             f"📊 ============ 未结束订单统计 ============"
         )
         logging.info(
-            f"📊 总订单数: {total_orders} (BUY={total_buy}, SELL={total_sell})"
+            f"📊 本地订单: {local_total} (BUY={local_buy}, SELL={local_sell}){imbalance_indicator}"
         )
+
+        if exchange_status == "OK":
+            # 交易所买卖不平衡检查
+            ex_diff = abs(exchange_buy - exchange_sell)
+            ex_imbalance = ex_diff / max(exchange_total, 1) * 100
+            ex_imbalance_ind = ""
+            if ex_imbalance > 20:
+                ex_imbalance_ind = f" ⚠️不平衡{ex_imbalance:.0f}%"
+            elif ex_imbalance > 10:
+                ex_imbalance_ind = f" 📊偏差{ex_imbalance:.0f}%"
+            
+            logging.info(
+                f"📊 交易所订单: {exchange_total} (BUY={exchange_buy}, SELL={exchange_sell}){diff_indicator}{ex_imbalance_ind}"
+            )
+        else:
+            logging.info(
+                f"📊 交易所订单: {exchange_status}"
+            )
 
         # 按类型打印（只打印有订单的类型）
         type_names = {
