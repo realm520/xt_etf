@@ -83,7 +83,8 @@ class Etf_stats:
             self.symbols[symbol]["xt_coin_remain"] = xt_coin_remain
 
     def get_position_bn(self):
-        from binance import Client
+        # 使用 ccxt 统一 API 的 Binance 客户端适配器
+        from etf.binance_client import BinanceClient as Client
 
         # TODO: Move API credentials to secure configuration file
         # These should be loaded from APIKey.json or environment variables

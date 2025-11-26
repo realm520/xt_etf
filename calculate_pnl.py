@@ -5,7 +5,8 @@ from etf.xt import Spot
 from etf.order_manager import OrderManager
 from etf.config import load_api_keys, load_binance_api_keys
 
-from binance import Client
+# 使用 ccxt 统一 API 的 Binance 客户端适配器
+from etf.binance_client import BinanceClient as Client
 
 logging.shutdown()
 logging.basicConfig(

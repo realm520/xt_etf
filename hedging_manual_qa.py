@@ -1,4 +1,5 @@
-from binance import Client
+# 使用 ccxt 统一 API 的 Binance 客户端适配器
+from etf.binance_client import BinanceClient as Client
 # from pyxt import Spot
 # TODO: Move API credentials to secure configuration file
 api_key = 'REPLACE_WITH_CONFIG'
