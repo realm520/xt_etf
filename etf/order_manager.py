@@ -19,12 +19,7 @@ from etf.utils.order_errors import (
 )
 
 # 导入WebSocket订单监听器
-try:
-    from etf.websocket.order_websocket import OrderWebSocketClient
-    ORDER_WEBSOCKET_AVAILABLE = True
-except ImportError:
-    ORDER_WEBSOCKET_AVAILABLE = False
-    logging.warning("订单WebSocket监听器未安装")
+from etf.websocket.order_websocket import OrderWebSocketClient
 
 # 导入订单记录器
 try:
@@ -117,7 +112,7 @@ class Order:
 
 
 class OrderManager:
-    def __init__(self, spot, strategy_name: str = "unknown", symbol_config=None, enable_websocket: bool = False, tier: int = 200):
+    def __init__(self, spot, strategy_name: str = "unknown", symbol_config=None, tier: int = 200):
         self.counter = 0
         self.client = spot
         self.strategy_name = strategy_name  # 添加策略名称
@@ -194,13 +189,10 @@ class OrderManager:
         self.last_balance_check_time = 0
         self.balance_check_interval = 60  # 默认每60秒检查一次
         
-        # 初始化WebSocket订单监听器（默认关闭，通过参数启用）
+        # 初始化WebSocket订单监听器（用于接收成交推送）
         self.order_ws_client = None
         self.use_order_websocket = False
-        
-        # 如果启用WebSocket且可用，则初始化订单监听器
-        if enable_websocket and ORDER_WEBSOCKET_AVAILABLE:
-            self._init_order_websocket()
+        self._init_order_websocket()
 
         # ✅ 初始化订单状态管理器（统一订单状态变更入口）
         self.state_manager = OrderStateManager(
@@ -319,21 +311,23 @@ class OrderManager:
         """订单更新回调函数 - 重构版
 
         当WebSocket接收到订单状态变化时触发。
+        支持 XT API 短字段名和标准长字段名两种格式。
 
         Args:
-            order_data: 订单数据字典，包含以下字段：
-                - orderId: 订单ID
-                - state: 订单状态 (NEW, PARTIALLY_FILLED, FILLED, CANCELED, REJECTED, EXPIRED)
-                - symbol: 交易对
-                - side: 方向 (BUY/SELL)
-                - price: 价格
-                - origQty: 原始数量
-                - executedQty: 已执行数量
-                - leavingQty: 剩余数量
-                - avgPrice: 平均成交价
-                - fee: 手续费
-                - time: 创建时间
-                - updatedTime: 更新时间
+            order_data: 订单数据字典，支持以下两种格式：
+            
+            XT API 短字段名格式：
+                - i: orderId, ci: clientOrderId, st: state
+                - s: symbol, sd: side, tp: type
+                - p: price, oq: origQty, eq: executedQty
+                - lq: leavingQty, ap: avgPrice, f: fee
+                - t: time, ct: createTime
+
+            标准长字段名格式：
+                - orderId, state, symbol, side
+                - price, origQty, executedQty
+                - leavingQty, avgPrice, fee
+                - time, updatedTime
 
         ✅ 重构说明：
         所有订单状态变更现在统一通过OrderStateManager处理，确保：
@@ -343,8 +337,12 @@ class OrderManager:
         4. 审计追踪完整性
         """
         try:
-            order_id = order_data.get('orderId')
-            state = order_data.get('state')
+            # ✅ 支持 XT API 短字段名格式（WebSocket推送使用短字段名）
+            # 字段映射: i->orderId, st->state, s->symbol, sd->side, 
+            #          p->price, oq->origQty, eq->executedQty, lq->leavingQty,
+            #          ap->avgPrice, f->fee, t->time, ct->createTime
+            order_id = order_data.get('orderId') or order_data.get('i')
+            state = order_data.get('state') or order_data.get('st')
 
             if not order_id or not state:
                 logging.warning(f"订单更新数据不完整: {order_data}")
@@ -352,19 +350,19 @@ class OrderManager:
 
             logging.debug(f"订单状态更新: {order_id} -> {state}")
 
-            # ✅ 统一的订单数据格式
+            # ✅ 统一的订单数据格式（支持短字段名和长字段名）
             unified_order_data = {
-                "symbol": order_data.get('symbol'),
-                "side": order_data.get('side'),
-                "price": order_data.get('price'),
-                "quantity": order_data.get('origQty'),
+                "symbol": order_data.get('symbol') or order_data.get('s'),
+                "side": order_data.get('side') or order_data.get('sd'),
+                "price": order_data.get('price') or order_data.get('p'),
+                "quantity": order_data.get('origQty') or order_data.get('oq'),
                 "orderId": order_id,
-                "executed_qty": order_data.get('executedQty', '0'),
+                "executed_qty": order_data.get('executedQty') or order_data.get('eq', '0'),
                 "state": state,
-                "avgPrice": order_data.get('avgPrice', '0'),
-                "fee": order_data.get('fee', '0'),
-                "time": order_data.get('time'),
-                "updatedTime": order_data.get('updatedTime')
+                "avgPrice": order_data.get('avgPrice') or order_data.get('ap', '0'),
+                "fee": order_data.get('fee') or order_data.get('f', '0'),
+                "time": order_data.get('time') or order_data.get('t'),
+                "updatedTime": order_data.get('updatedTime') or order_data.get('ct')
             }
 
             # ✅ 调用统一状态管理器
@@ -379,36 +377,106 @@ class OrderManager:
                 # 更新partially_filled_orders追踪（业务逻辑需要）
                 if state == 'PARTIALLY_FILLED':
                     self.partially_filled_orders[order_id] = self.open_orders.get(order_id)
-                    logging.info(f"订单部分成交: {order_id} | 已执行 {order_data.get('executedQty')}/{order_data.get('origQty')}")
+                    exec_qty = order_data.get('executedQty') or order_data.get('eq')
+                    orig_qty = order_data.get('origQty') or order_data.get('oq')
+                    logging.info(f"订单部分成交: {order_id} | 已执行 {exec_qty}/{orig_qty}")
+                    
+                    # ✅ 记录部分成交到trades表（因为XT不推送trade消息）
+                    self._record_trade_from_order_update(unified_order_data, order_id)
 
                 # 从partially_filled_orders中移除已终态的订单
                 elif state in ['FILLED', 'CANCELED', 'REJECTED', 'EXPIRED']:
                     if order_id in self.partially_filled_orders:
                         self.partially_filled_orders.pop(order_id)
                     logging.info(f"订单状态变更: {order_id} -> {state}")
+                    
+                    # ✅ 记录完全成交到trades表（因为XT不推送trade消息）
+                    if state == 'FILLED':
+                        self._record_trade_from_order_update(unified_order_data, order_id)
             else:
                 logging.warning(f"订单状态更新失败（可能是非法转换）: {order_id} -> {state}")
 
         except Exception as e:
             logging.error(f"处理订单更新失败: {e}", exc_info=True)
+
+    def _record_trade_from_order_update(self, order_data: Dict, order_id: str):
+        """
+        从订单更新中提取成交信息并记录到trades表
+        
+        说明：XT交易所只推送order主题消息，不推送trade主题消息。
+        因此需要从订单状态更新中提取成交信息并记录。
+        
+        Args:
+            order_data: 统一格式的订单数据
+            order_id: 订单ID
+        """
+        if not self.order_recorder:
+            return
+            
+        try:
+            symbol = order_data.get('symbol')
+            side = order_data.get('side')
+            price = order_data.get('avgPrice') or order_data.get('price')  # 优先使用成交均价
+            executed_qty = order_data.get('executed_qty', '0')
+            fee = order_data.get('fee', '0')
+            
+            # 转换为数值
+            try:
+                price = float(price) if price else 0
+                quantity = float(executed_qty) if executed_qty else 0
+                fee = float(fee) if fee else 0
+            except (ValueError, TypeError):
+                logging.warning(f"订单数据转换失败: price={price}, qty={executed_qty}, fee={fee}")
+                return
+                
+            if quantity <= 0:
+                logging.debug(f"订单 {order_id} 成交量为0，跳过记录")
+                return
+            
+            # 构造成交记录
+            record_data = {
+                "symbol": symbol,
+                "trade_id": f"{order_id}_ws_fill",  # 使用orderId生成唯一trade_id
+                "order_id": order_id,
+                "price": price,
+                "quantity": quantity,
+                "quote_quantity": price * quantity,
+                "is_buyer": side == 'BUY',
+                "traded_at": datetime.now(timezone.utc),
+                "strategy_name": self.strategy_name,
+                "fee": fee,
+                "fee_currency": "USDT"  # 默认手续费币种
+            }
+            
+            # 记录成交
+            self.record_trade(record_data, trade_purpose="market_making")
+            logging.info(f"✅ 从订单更新记录成交: {order_id} | {symbol} | {side} | {quantity}@{price}")
+            
+            # 同时记录到recent_fills（用于洗盘交易智能调整）
+            self.record_fill(quantity, price)
+            
+        except Exception as e:
+            logging.error(f"从订单更新记录成交失败: {e}", exc_info=True)
     
     def _on_trade(self, trade_data: Dict):
         """成交推送回调函数 - 重构版
 
         当WebSocket接收到订单成交事件时触发。
+        支持 XT API 短字段名和标准长字段名两种格式。
 
         Args:
-            trade_data: 成交数据字典，包含以下字段：
-                - tradeId: 成交ID
-                - orderId: 订单ID
-                - symbol: 交易对
-                - side: 方向 (BUY/SELL)
-                - price: 成交价格
-                - quantity: 成交数量
-                - fee: 手续费
-                - feeCurrency: 手续费币种
-                - isMaker: 是否为maker
-                - time: 成交时间
+            trade_data: 成交数据字典，支持以下两种格式：
+            
+            XT API 短字段名格式：
+                - i: tradeId, oi: orderId, s: symbol
+                - p: price, q: quantity, v: quoteQty
+                - tm: takerMaker (1=taker, 2=maker), t: time
+                - f: fee, fc: feeCurrency
+
+            标准长字段名格式：
+                - tradeId, orderId, symbol, side
+                - price, quantity, fee, feeCurrency
+                - isMaker, time
 
         ✅ 重构说明：
         成交事件处理现在通过OrderStateManager.handle_trade_event()统一管理，确保：
@@ -417,9 +485,11 @@ class OrderManager:
         3. 成交数据完整记录到数据库
         """
         try:
-            order_id = trade_data.get('orderId')
-            quantity = float(trade_data.get('quantity', 0))
-            price = float(trade_data.get('price', 0))
+            # ✅ 支持 XT API 短字段名格式
+            # 字段映射: oi->orderId, i->tradeId, s->symbol, p->price, q->quantity
+            order_id = trade_data.get('orderId') or trade_data.get('oi')
+            quantity = float(trade_data.get('quantity') or trade_data.get('q', 0))
+            price = float(trade_data.get('price') or trade_data.get('p', 0))
 
             if not order_id:
                 logging.warning(f"成交推送缺少orderId: {trade_data}")
@@ -445,33 +515,49 @@ class OrderManager:
 
             # 3. 记录成交到数据库（如果order_recorder可用）
             if self.order_recorder:
+                # ✅ 支持短字段名: s->symbol, i->tradeId, tm->takerMaker, f->fee, fc->feeCurrency
+                symbol = trade_data.get('symbol') or trade_data.get('s')
+                trade_id = trade_data.get('tradeId') or trade_data.get('i')
+                side = trade_data.get('side') or trade_data.get('sd')
+                # takerMaker: 1=taker, 2=maker
+                tm = trade_data.get('tm')
+                is_maker = trade_data.get('isMaker', tm == 2 if tm else False)
+                fee = float(trade_data.get('fee') or trade_data.get('f', 0))
+                fee_currency = trade_data.get('feeCurrency') or trade_data.get('fc', 'USDT')
+                
                 record_data = {
-                    "symbol": trade_data.get('symbol'),
-                    "trade_id": trade_data.get('tradeId'),
+                    "symbol": symbol,
+                    "trade_id": trade_id,
                     "order_id": order_id,
                     "price": price,
                     "quantity": quantity,
                     "quote_quantity": price * quantity,
-                    "is_buyer": trade_data.get('side') == 'BUY',
+                    "is_buyer": side == 'BUY',
                     "traded_at": datetime.now(timezone.utc),
                     "strategy_name": self.strategy_name,
-                    "is_maker": trade_data.get('isMaker', False),
-                    "fee": float(trade_data.get('fee', 0)),
-                    "fee_currency": trade_data.get('feeCurrency', 'USDT')
+                    "is_maker": is_maker,
+                    "fee": fee,
+                    "fee_currency": fee_currency
                 }
 
                 # 异步记录成交
                 self.record_trade(record_data)
 
             # 4. 更新交易历史（用于本地追踪）
+            # ✅ 支持短字段名
+            symbol = trade_data.get('symbol') or trade_data.get('s')
+            trade_id = trade_data.get('tradeId') or trade_data.get('i')
+            side = trade_data.get('side') or trade_data.get('sd')
+            trade_time = trade_data.get('time') or trade_data.get('t')
+            
             self.trading_history.append({
-                "trade_id": trade_data.get('tradeId'),
+                "trade_id": trade_id,
                 "order_id": order_id,
-                "symbol": trade_data.get('symbol'),
-                "side": trade_data.get('side'),
+                "symbol": symbol,
+                "side": side,
                 "price": price,
                 "quantity": quantity,
-                "time": trade_data.get('time'),
+                "time": trade_time,
                 "timestamp": datetime.now(timezone.utc).isoformat()
             })
 

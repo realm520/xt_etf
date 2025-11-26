@@ -377,17 +377,33 @@ class OrderStateManager:
 
         try:
             # 调用order_recorder的异步记录方法
-            # 注意：这里假设order_recorder有record_order方法
             if hasattr(self.order_recorder, 'record_order'):
-                self.order_recorder.record_order(
-                    order_data={
-                        **order_data,
-                        'orderId': order_id,
-                        'state': new_state,
-                        'trigger_source': trigger_source,
-                        'update_time': datetime.now().isoformat()
-                    }
-                )
+                order_record_data = {
+                    **order_data,
+                    'orderId': order_id,
+                    'state': new_state,
+                    'trigger_source': trigger_source,
+                    'update_time': datetime.now().isoformat()
+                }
+                
+                # ✅ 使用异步调度器调用async方法（修复：之前直接调用导致协程未执行）
+                if self.async_scheduler:
+                    coro = self.order_recorder.record_order(order_data=order_record_data)
+                    self.async_scheduler(coro)
+                    self.logger.debug(
+                        f"订单状态持久化已调度: {order_id} -> {new_state}"
+                    )
+                else:
+                    # 降级：直接放入队列（不更新Redis缓存）
+                    if hasattr(self.order_recorder, 'order_queue'):
+                        from datetime import timezone
+                        order_record_data['recorded_at'] = datetime.now(timezone.utc)
+                        self.order_recorder.order_queue.put_nowait(order_record_data)
+                        self.logger.debug(f"订单状态直接入队: {order_id} -> {new_state}")
+                    else:
+                        self.logger.warning(
+                            f"无法持久化订单状态: async_scheduler和order_queue都不可用"
+                        )
             else:
                 self.logger.warning("order_recorder does not have record_order method")
 

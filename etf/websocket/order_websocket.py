@@ -220,15 +220,20 @@ class OrderWebSocketClient:
                     await asyncio.sleep(5)
                     continue
 
-                # Step 2: 连接WebSocket（带listenKey）
-                url = f"{self.ws_url}?listenKey={self._listen_key}"
+                # Step 2: 连接WebSocket（使用Header传递listenKey，避免URL参数超时问题）
+                # QA2环境URL参数方式会超时，改用Header方式
+                url = self.ws_url
+                headers = {
+                    "X-Listen-Key": self._listen_key,
+                }
                 logger.info(f"WebSocket基础URL: {self.ws_url}")
-                logger.info(f"正在连接订单WebSocket: {url}")
+                logger.info(f"正在连接订单WebSocket (Header认证)...")
 
                 async with websockets.connect(
                     url,
                     ping_interval=self.ping_interval,
-                    ping_timeout=self.ping_timeout
+                    ping_timeout=self.ping_timeout,
+                    additional_headers=headers
                 ) as ws:
                     self._ws = ws
                     self._connected = True
@@ -261,23 +266,30 @@ class OrderWebSocketClient:
 
     async def _subscribe_orders(self):
         """
-        订阅订单更新流（XT官方协议）
+        订阅订单和成交更新流（XT官方协议）
 
         订阅格式:
         {
             "method": "subscribe",
-            "params": ["orders@symbol"],
+            "params": ["order@symbol", "trade@symbol"],
             "id": "request_id"
         }
+
+        注意：需要同时订阅order和trade频道（单数形式）：
+        - order: 订单状态变化（NEW, PARTIALLY_FILLED, FILLED, CANCELED等）
+        - trade: 成交明细（每笔成交的价格、数量、手续费等）
         """
+        # 订阅订单和成交频道（不需要指定symbol，会推送账户下所有订单）
+        # 订阅消息必须包含 listenKey
         subscribe_msg = {
             "method": "subscribe",
-            "params": [f"orders@{self.symbol}"],
+            "params": ["order", "trade"],
+            "listenKey": self._listen_key,
             "id": str(int(time.time() * 1000))
         }
 
         await self._ws.send(json.dumps(subscribe_msg))
-        logger.info(f"已订阅订单更新流: orders@{self.symbol}")
+        logger.info(f"已订阅订单和成交更新流: order, trade (账户级别，过滤symbol: {self.symbol})")
 
     async def _message_loop(self):
         """消息接收循环"""
@@ -298,44 +310,42 @@ class OrderWebSocketClient:
         """
         处理WebSocket消息（XT官方协议）
 
-        订单更新消息格式:
+        订单更新消息格式（注意：字段使用短名称）:
         {
-            "topic": "orders",
-            "event": "update",
+            "topic": "order",
+            "event": "order",
             "data": {
-                "orderId": "449413067009423617",
-                "clientOrderId": "16559590087220001",
-                "symbol": "btc_usdt",
-                "side": "BUY",
-                "type": "LIMIT",
-                "price": "50000.00",
-                "origQty": "0.001",
-                "executedQty": "0.0005",
-                "leavingQty": "0.0005",
-                "state": "PARTIALLY_FILLED",
-                "avgPrice": "50000.00",
-                "fee": "0.025",
-                "feeCurrency": "usdt",
-                "time": 1737039804101,
-                "updatedTime": 1737039805123
+                "s": "btc_usdt",           // Symbol
+                "i": "6216559590087220004", // Order ID
+                "ci": "test123",            // Client order ID
+                "st": "PARTIALLY_FILLED",   // State (NEW/PARTIALLY_FILLED/FILLED/CANCELED/REJECTED/EXPIRED)
+                "sd": "BUY",                // Side (BUY/SELL)
+                "tp": "LIMIT",              // Type (LIMIT/MARKET)
+                "oq": "4",                  // Original quantity
+                "eq": "2",                  // Executed quantity
+                "lq": "2",                  // Remaining quantity
+                "p": "4000",                // Price
+                "ap": "30000",              // Average price
+                "f": "0.002",               // Fee
+                "t": 1656043204763,         // Happened time (ms)
+                "ct": 1656043204663         // Create time (ms)
             }
         }
 
         成交消息格式:
         {
-            "topic": "trades",
+            "topic": "trade",
             "event": "trade",
             "data": {
-                "tradeId": "123456789",
-                "orderId": "449413067009423617",
-                "symbol": "btc_usdt",
-                "side": "BUY",
-                "price": "50000.00",
-                "quantity": "0.0005",
-                "fee": "0.025",
-                "feeCurrency": "usdt",
-                "isMaker": false,
-                "time": 1737039805123
+                "s": "btc_usdt",             // Symbol
+                "i": 6316559590087222000,    // Trade ID
+                "oi": 6616559590087222666,   // Order ID
+                "p": "43000",                // Price
+                "q": "0.21",                 // Quantity
+                "v": "9030",                 // Quote quantity
+                "b": true,                   // Whether buyer is maker
+                "tm": 1,                     // Taker/maker: 1=taker, 2=maker
+                "t": 1655992403617           // Trade time (ms)
             }
         }
         """
@@ -354,48 +364,60 @@ class OrderWebSocketClient:
                     logger.warning(f"⚠️ 订阅响应: code={code}, msg={msg} (id={request_id})")
                 return
 
-            # 处理订单更新
-            if data.get('topic') == 'orders' and 'data' in data:
+            # 处理订单更新（注意：topic是单数 "order"）
+            if data.get('topic') == 'order' and 'data' in data:
                 self._handle_order_update(data['data'])
                 return
 
-            # 处理成交推送
-            if data.get('topic') == 'trades' and 'data' in data:
+            # 处理成交推送（注意：topic是单数 "trade"）
+            if data.get('topic') == 'trade' and 'data' in data:
                 self._handle_trade(data['data'])
                 return
 
             # 未知消息类型
-            logger.debug(f"未识别的消息类型: {data.get('topic')}")
+            logger.warning(f"未识别的消息类型: {data.get('topic')}")
 
         except json.JSONDecodeError as e:
             logger.error(f"JSON解析失败: {e}")
 
     def _handle_order_update(self, order_data: Dict[str, Any]):
         """
-        处理订单更新
+        处理订单更新（使用XT API短字段名）
+
+        字段映射:
+            s: symbol, i: orderId, ci: clientOrderId, st: state,
+            sd: side, tp: type, p: price, oq: origQty, eq: executedQty,
+            lq: leavingQty, ap: avgPrice, f: fee, t: time, ct: createTime
 
         Args:
-            order_data: 订单数据字典
+            order_data: 订单数据字典（短字段名格式）
         """
         try:
-            order_id = order_data.get('orderId')
-            state = order_data.get('state')
-            symbol = order_data.get('symbol')
+            # 使用短字段名
+            order_id = order_data.get('i')
+            state = order_data.get('st')
+            symbol = order_data.get('s')
+
+            # 过滤非当前交易对的订单（账户级别推送）
+            if symbol and self.symbol and symbol.lower() != self.symbol.lower():
+                logger.debug(f"忽略其他交易对订单: {symbol} (当前: {self.symbol})")
+                return
 
             logger.info(
                 f"📋 订单更新: {order_id} | {symbol} | {state} | "
-                f"价格:{order_data.get('price')} | "
-                f"已成交:{order_data.get('executedQty')}/{order_data.get('origQty')}"
+                f"价格:{order_data.get('p')} | "
+                f"已成交:{order_data.get('eq')}/{order_data.get('oq')}"
             )
 
             # 更新订单缓存
             with self._cache_lock:
                 self._order_cache[order_id] = order_data
-                self._stats['order_states'][state] += 1
+                if state:
+                    self._stats['order_states'][state] += 1
 
             self._stats['order_updates'] += 1
 
-            # 调用回调函数
+            # 调用回调函数（传递原始短字段名数据）
             if self.on_order_update:
                 try:
                     self.on_order_update(order_data)
@@ -407,17 +429,27 @@ class OrderWebSocketClient:
 
     def _handle_trade(self, trade_data: Dict[str, Any]):
         """
-        处理成交推送
+        处理成交推送（使用XT API短字段名）
+
+        字段映射:
+            s: symbol, i: tradeId, oi: orderId, p: price, q: quantity,
+            v: quoteQty, b: buyerIsMaker, tm: takerMaker (1=taker, 2=maker), t: time
 
         Args:
-            trade_data: 成交数据字典
+            trade_data: 成交数据字典（短字段名格式）
         """
         try:
-            trade_id = trade_data.get('tradeId')
-            order_id = trade_data.get('orderId')
-            symbol = trade_data.get('symbol')
-            quantity = trade_data.get('quantity')
-            price = trade_data.get('price')
+            # 使用短字段名
+            trade_id = trade_data.get('i')
+            order_id = trade_data.get('oi')
+            symbol = trade_data.get('s')
+            quantity = trade_data.get('q')
+            price = trade_data.get('p')
+
+            # 过滤非当前交易对的成交（账户级别推送）
+            if symbol and self.symbol and symbol.lower() != self.symbol.lower():
+                logger.debug(f"忽略其他交易对成交: {symbol} (当前: {self.symbol})")
+                return
 
             logger.info(
                 f"💰 成交推送: {trade_id} | 订单:{order_id} | {symbol} | "
@@ -426,7 +458,7 @@ class OrderWebSocketClient:
 
             self._stats['trades'] += 1
 
-            # 调用回调函数
+            # 调用回调函数（传递原始短字段名数据）
             if self.on_trade:
                 try:
                     self.on_trade(trade_data)

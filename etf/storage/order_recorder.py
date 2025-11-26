@@ -295,8 +295,14 @@ class OrderRecorder:
             return
 
         try:
+            # 获取trade_id，兼容两种命名格式（tradeId/trade_id）
+            trade_id = trade_data.get('tradeId') or trade_data.get('trade_id')
+            if not trade_id:
+                logging.warning(f"成交数据缺少trade_id，跳过缓存更新: {trade_data.get('symbol')}")
+                return
+            
             # 存储最新成交信息
-            key = f"trade:{trade_data['symbol']}:{trade_data['tradeId']}"
+            key = f"trade:{trade_data['symbol']}:{trade_id}"
             await self.redis.hset(
                 key,
                 mapping={
@@ -440,6 +446,18 @@ class OrderRecorder:
         if self._db_available and self.async_session:
             try:
                 async with self.async_session() as session:
+                    # 按 order_id 去重，保留最后一条（最新状态）
+                    # 解决 "ON CONFLICT DO UPDATE command cannot affect row a second time" 错误
+                    unique_orders = {}
+                    for order in orders:
+                        order_id = order.get("order_id") or order.get("orderId", "")
+                        if order_id:
+                            unique_orders[order_id] = order
+                    orders = list(unique_orders.values())
+                    
+                    if not orders:
+                        return
+
                     # 转换为数据库模型格式
                     order_records = []
                     for order in orders:
@@ -603,7 +621,7 @@ class OrderRecorder:
 
                     # 批量插入
                     await session.execute(
-                        insert(TradeModel).values(trade_records)
+                        pg_insert(TradeModel).values(trade_records)
                     )
                     await session.commit()
 
