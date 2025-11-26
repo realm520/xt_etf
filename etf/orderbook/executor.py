@@ -76,7 +76,8 @@ class OrderExecutor:
         symbol: str,                # 交易对
         strategy_name: str,
         max_layer: Optional[int] = None,  # 新增：最大档位数（用于订单数量保护）
-        logger: Optional[logging.Logger] = None
+        logger: Optional[logging.Logger] = None,
+        stats_print_interval: int = 10,  # 统计打印间隔（每N次execute_orderbook_update打印一次）
     ):
         self.order_manager = order_manager
         self.symbol = symbol
@@ -86,6 +87,10 @@ class OrderExecutor:
 
         # 记录当前周期的反针对订单ID
         self.current_anti_pin_order_ids: List[str] = []
+
+        # 订单统计打印控制
+        self.stats_print_interval = stats_print_interval
+        self._stats_print_counter = 0
 
     def execute_orderbook_update(
         self,
@@ -150,23 +155,48 @@ class OrderExecutor:
                     f"洗盘={order_stats['wash_trading']}, 对冲={order_stats['hedging']}, 未知={order_stats['unknown']}"
                 )
 
+        # === 0.5 定期打印订单详细统计 ===
+        self.print_order_stats(current_orders)
+
         # === 1. 订单匹配分析 ===
         optimized_add_orders, optimized_cancel_orders = self._match_orders(
             current_orders, target_orders
         )
 
-        # === 1.5 硬性订单上限保护 ===
-        # 计算可用槽位：max_layer - 当前订单数 - 预留给反针对的槽位
+        # === 1.5 硬性订单上限保护（优化版：方案1+4）===
+        # 方案1: 考虑待取消的订单数量
+        # 方案4: 只计算做市订单数量，不把洗盘/对冲订单计入上限
+        
+        # 初始化变量（用于后续反针对订单保护）
+        effective_mm_count = order_stats['market_making']  # 默认值
+        
         if self.max_layer is not None:
-            anti_pin_reserve = 10  # 预留10个槽位给反针对订单
-            available_slots = max(0, self.max_layer - current_order_count - anti_pin_reserve)
+            anti_pin_reserve = 5  # 预留5个槽位给反针对订单（从10减少到5）
+            
+            # 统计待取消订单中的做市订单数量
+            cancel_stats = self._count_orders_by_type(optimized_cancel_orders)
+            cancel_mm_count = cancel_stats['market_making']
+            
+            # 当前做市订单数量（只计算做市订单，不含洗盘/对冲等）
+            current_mm_count = order_stats['market_making']
+            
+            # 优化计算：考虑待取消的做市订单
+            # 净做市订单数 = 当前做市订单 - 待取消做市订单
+            effective_mm_count = current_mm_count - cancel_mm_count
+            available_slots = max(0, self.max_layer - effective_mm_count - anti_pin_reserve)
             
             if len(optimized_add_orders) > available_slots:
                 original_count = len(optimized_add_orders)
                 optimized_add_orders = optimized_add_orders[:available_slots]
                 self.logger.warning(
                     f"🔒 硬性上限保护: 截断做市订单 {original_count} → {len(optimized_add_orders)} "
-                    f"(当前={current_order_count}, 上限={self.max_layer}, 可用槽位={available_slots})"
+                    f"(做市订单={current_mm_count}, 待取消={cancel_mm_count}, "
+                    f"净做市={effective_mm_count}, 上限={self.max_layer}, 可用槽位={available_slots})"
+                )
+            else:
+                self.logger.debug(
+                    f"📊 做市订单槽位充足: 当前做市={current_mm_count}, 待取消={cancel_mm_count}, "
+                    f"净做市={effective_mm_count}, 可用={available_slots}, 需添加={len(optimized_add_orders)}"
                 )
 
         # 为每个新订单设置clientOrderId和order_purpose
@@ -204,18 +234,20 @@ class OrderExecutor:
                 best_sell, best_buy, anti_pin_config
             )
             
-            # 检查是否有足够槽位添加反针对订单
+            # 检查是否有足够槽位添加反针对订单（优化版：只计算做市+反针对订单）
             if self.max_layer is not None:
-                total_after_add = current_order_count + len(optimized_add_orders) + len(anti_pin_orders)
-                if total_after_add > self.max_layer:
-                    # 计算可用槽位
-                    remaining_slots = max(0, self.max_layer - current_order_count - len(optimized_add_orders))
+                # 净做市订单数 + 待添加做市订单 + 反针对订单
+                total_mm_after_add = effective_mm_count + len(optimized_add_orders) + len(anti_pin_orders)
+                if total_mm_after_add > self.max_layer:
+                    # 计算可用槽位（基于做市订单数）
+                    remaining_slots = max(0, self.max_layer - effective_mm_count - len(optimized_add_orders))
                     if remaining_slots < len(anti_pin_orders):
                         original_antipin_count = len(anti_pin_orders)
                         anti_pin_orders = anti_pin_orders[:remaining_slots]
                         self.logger.warning(
                             f"🔒 反针对订单截断: {original_antipin_count} → {len(anti_pin_orders)} "
-                            f"(总计将达到: {current_order_count + len(optimized_add_orders) + len(anti_pin_orders)}/{self.max_layer})"
+                            f"(做市订单={effective_mm_count}+{len(optimized_add_orders)}, "
+                            f"总计将达到: {effective_mm_count + len(optimized_add_orders) + len(anti_pin_orders)}/{self.max_layer})"
                         )
             
             optimized_add_orders.extend(anti_pin_orders)
@@ -330,6 +362,112 @@ class OrderExecutor:
                 stats["unknown"] += 1
         
         return stats
+
+    def _count_orders_by_type_and_side(
+        self, orders: List[Dict[str, Any]]
+    ) -> Dict[str, Dict[str, int]]:
+        """按订单类型和方向统计订单数量
+
+        根据 clientOrderId 前缀判断订单类型，并按 side 分类：
+        - mm_: market_making (做市订单)
+        - antipin_: anti_pin (反针对订单)
+        - wash_: wash_trading (洗盘订单)
+        - hedge_: hedging (对冲订单)
+        - 其他: unknown (未知类型，可能是旧版纯数字ID)
+
+        Returns:
+            Dict: 嵌套结构 {type: {side: count, 'total': count}}
+            示例: {
+                'market_making': {'BUY': 10, 'SELL': 8, 'total': 18},
+                'anti_pin': {'BUY': 2, 'SELL': 2, 'total': 4},
+                ...
+            }
+        """
+        order_types = ["market_making", "anti_pin", "wash_trading", "hedging", "unknown"]
+        stats = {
+            order_type: {"BUY": 0, "SELL": 0, "total": 0}
+            for order_type in order_types
+        }
+
+        for order in orders:
+            client_order_id = order.get("clientOrderId", "") or ""
+            side = order.get("side", "UNKNOWN")
+
+            # 确定订单类型
+            if client_order_id.startswith("mm_"):
+                order_type = "market_making"
+            elif client_order_id.startswith("antipin_"):
+                order_type = "anti_pin"
+            elif client_order_id.startswith("wash_"):
+                order_type = "wash_trading"
+            elif client_order_id.startswith("hedge_"):
+                order_type = "hedging"
+            else:
+                order_type = "unknown"
+
+            # 统计
+            if side in ["BUY", "SELL"]:
+                stats[order_type][side] += 1
+            stats[order_type]["total"] += 1
+
+        return stats
+
+    def print_order_stats(
+        self,
+        current_orders: List[Dict[str, Any]],
+        force: bool = False
+    ) -> None:
+        """定期打印未结束订单的统计信息
+
+        Args:
+            current_orders: 当前挂单列表
+            force: 是否强制打印（忽略间隔计数器）
+        """
+        self._stats_print_counter += 1
+
+        # 检查是否应该打印（达到间隔或强制）
+        if not force and self._stats_print_counter < self.stats_print_interval:
+            return
+
+        # 重置计数器
+        self._stats_print_counter = 0
+
+        # 获取详细统计
+        detailed_stats = self._count_orders_by_type_and_side(current_orders)
+
+        # 计算总数
+        total_orders = sum(stats["total"] for stats in detailed_stats.values())
+        total_buy = sum(stats["BUY"] for stats in detailed_stats.values())
+        total_sell = sum(stats["SELL"] for stats in detailed_stats.values())
+
+        # 构建打印内容
+        logging.info(
+            f"📊 ============ 未结束订单统计 ============"
+        )
+        logging.info(
+            f"📊 总订单数: {total_orders} (BUY={total_buy}, SELL={total_sell})"
+        )
+
+        # 按类型打印（只打印有订单的类型）
+        type_names = {
+            "market_making": "做市",
+            "anti_pin": "反针对",
+            "wash_trading": "洗盘",
+            "hedging": "对冲",
+            "unknown": "未知"
+        }
+
+        for order_type, stats in detailed_stats.items():
+            if stats["total"] > 0:
+                type_name = type_names.get(order_type, order_type)
+                logging.info(
+                    f"📊   {type_name}: {stats['total']:3d} "
+                    f"(BUY={stats['BUY']:3d}, SELL={stats['SELL']:3d})"
+                )
+
+        logging.info(
+            f"📊 =========================================="
+        )
 
     def _match_orders(
         self,
