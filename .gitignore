@@ -108,3 +108,5 @@ pyrightconfig.json
 
 # Claude 生成的文档
 claudedocs/
+# MCP 工具临时目录
+.playwright-mcp/
