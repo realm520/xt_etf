@@ -72,6 +72,10 @@ class MinuteKlineState:
         trade_count: 本分钟成交笔数
         direction: 本分钟价格方向 (1=上涨, -1=下跌, 0=震荡)
         target_amplitude: 本分钟目标振幅
+        touched_upper: 是否触及上边界（卖一附近）
+        touched_lower: 是否触及下边界（买一附近）
+        safe_min: 本分钟的安全下限（买一）
+        safe_max: 本分钟的安全上限（卖一）
     """
     minute_ts: int
     open_price: float
@@ -81,6 +85,10 @@ class MinuteKlineState:
     trade_count: int = 0
     direction: int = 0  # 1=上涨, -1=下跌, 0=震荡
     target_amplitude: float = 0.002  # 目标振幅 0.2%
+    touched_upper: bool = False  # 是否触及上边界（卖一附近）
+    touched_lower: bool = False  # 是否触及下边界（买一附近）
+    safe_min: float = 0.0  # 安全下限
+    safe_max: float = 0.0  # 安全上限
 
 
 class MinuteKlineManager:
@@ -115,6 +123,12 @@ class MinuteKlineManager:
         # ✅ K线形态参数
         self.consecutive_direction: int = 0  # 连续同向K线计数
         self.max_consecutive: int = 5  # 最大连续同向数
+        
+        # ✅ 边界触及追踪（避免连续K线触及同一边界）
+        self.recent_upper_touches: int = 0  # 最近连续触及上边界的K线数
+        self.recent_lower_touches: int = 0  # 最近连续触及下边界的K线数
+        self.boundary_cooldown: int = 3  # 触及边界后N根K线内避免再触及
+        self.boundary_threshold: float = 0.002  # 距离边界2%以内算触及
         
     def get_current_minute(self) -> int:
         """获取当前分钟时间戳"""
@@ -185,6 +199,19 @@ class MinuteKlineManager:
         if self.current_kline:
             self.last_kline = self.current_kline
             
+            # ✅ 更新边界触及计数
+            if self.last_kline.touched_upper:
+                self.recent_upper_touches += 1
+                logging.info(f"📈 上一K线触及上边界, 连续触及次数: {self.recent_upper_touches}")
+            else:
+                self.recent_upper_touches = 0  # 重置
+                
+            if self.last_kline.touched_lower:
+                self.recent_lower_touches += 1
+                logging.info(f"📉 上一K线触及下边界, 连续触及次数: {self.recent_lower_touches}")
+            else:
+                self.recent_lower_touches = 0  # 重置
+            
             # 更新连续方向计数
             if self.last_kline.close_price > self.last_kline.open_price:
                 if self.consecutive_direction > 0:
@@ -230,11 +257,30 @@ class MinuteKlineManager:
         """
         if not self.current_kline:
             return
+        
+        kline = self.current_kline
+        kline.high_price = max(kline.high_price, price)
+        kline.low_price = min(kline.low_price, price)
+        kline.close_price = price
+        kline.trade_count += 1
+        
+        # ✅ 检测边界触及（距离边界 < 2% 算触及）
+        if kline.safe_max > 0 and kline.safe_min > 0:
+            price_range = kline.safe_max - kline.safe_min
+            upper_distance = (kline.safe_max - kline.high_price) / price_range
+            lower_distance = (kline.low_price - kline.safe_min) / price_range
             
-        self.current_kline.high_price = max(self.current_kline.high_price, price)
-        self.current_kline.low_price = min(self.current_kline.low_price, price)
-        self.current_kline.close_price = price
-        self.current_kline.trade_count += 1
+            # 触及上边界（卖一）
+            if upper_distance < self.boundary_threshold:
+                if not kline.touched_upper:
+                    kline.touched_upper = True
+                    logging.debug(f"⬆️ K线触及上边界: high={kline.high_price:.6f}, 卖一={kline.safe_max:.6f}")
+            
+            # 触及下边界（买一）
+            if lower_distance < self.boundary_threshold:
+                if not kline.touched_lower:
+                    kline.touched_lower = True
+                    logging.debug(f"⬇️ K线触及下边界: low={kline.low_price:.6f}, 买一={kline.safe_min:.6f}")
         
         # 记录价格历史
         self.price_history.append(price)
@@ -251,9 +297,11 @@ class MinuteKlineManager:
         
         基于当前K线状态和安全区间，计算下一笔成交应该在哪个价位
         
+        ✅ 边界避让逻辑：如果最近K线触及过某边界，当前K线应避开该边界
+        
         Args:
-            safe_min: 安全价格下限
-            safe_max: 安全价格上限
+            safe_min: 安全价格下限（买一）
+            safe_max: 安全价格上限（卖一）
             prec: 价格精度
             
         Returns:
@@ -265,6 +313,35 @@ class MinuteKlineManager:
         
         kline = self.current_kline
         last_price = kline.close_price
+        price_range = safe_max - safe_min
+        
+        # ✅ 记录当前K线的安全区间（用于后续边界检测）
+        kline.safe_min = safe_min
+        kline.safe_max = safe_max
+        
+        # ✅ 计算有效价格区间（考虑边界避让）
+        effective_min = safe_min
+        effective_max = safe_max
+        
+        # 如果最近连续触及上边界，本K线应该远离上边界
+        if self.recent_upper_touches >= 1:
+            # 收缩上边界：距离卖一保留 5%-15% 的空间
+            shrink_ratio = min(0.15, 0.05 * self.recent_upper_touches)
+            effective_max = safe_max - price_range * shrink_ratio
+            logging.debug(
+                f"🔒 上边界避让: 最近{self.recent_upper_touches}根K线触及上边界, "
+                f"有效上限从{safe_max:.6f}收缩到{effective_max:.6f}"
+            )
+        
+        # 如果最近连续触及下边界，本K线应该远离下边界
+        if self.recent_lower_touches >= 1:
+            # 收缩下边界：距离买一保留 5%-15% 的空间
+            shrink_ratio = min(0.15, 0.05 * self.recent_lower_touches)
+            effective_min = safe_min + price_range * shrink_ratio
+            logging.debug(
+                f"🔒 下边界避让: 最近{self.recent_lower_touches}根K线触及下边界, "
+                f"有效下限从{safe_min:.6f}收缩到{effective_min:.6f}"
+            )
         
         # 根据K线方向和进度，计算目标价格
         total_trades_expected = 6  # 假设每分钟6笔成交
@@ -301,8 +378,8 @@ class MinuteKlineManager:
         max_gap = last_price * 0.001  # 最大0.1%的价格跳跃
         target_price = max(last_price - max_gap, min(last_price + max_gap, target_price))
         
-        # 限制在安全区间内
-        target_price = max(safe_min, min(safe_max, target_price))
+        # ✅ 限制在有效区间内（考虑边界避让）
+        target_price = max(effective_min, min(effective_max, target_price))
         
         return round(target_price, prec)
     
@@ -340,6 +417,9 @@ class MinuteKlineManager:
             "symbol": self.symbol,
             "consecutive_direction": self.consecutive_direction,
             "price_history_count": len(self.price_history),
+            # ✅ 边界触及统计
+            "recent_upper_touches": self.recent_upper_touches,
+            "recent_lower_touches": self.recent_lower_touches,
         }
         
         if self.current_kline:
@@ -355,6 +435,9 @@ class MinuteKlineManager:
                     (self.current_kline.high_price - self.current_kline.low_price) 
                     / self.current_kline.open_price * 100
                 ) if self.current_kline.open_price > 0 else 0,
+                # ✅ 当前K线边界触及状态
+                "current_touched_upper": self.current_kline.touched_upper,
+                "current_touched_lower": self.current_kline.touched_lower,
             })
         
         if self.last_kline:
@@ -364,6 +447,9 @@ class MinuteKlineManager:
                     (self.last_kline.high_price - self.last_kline.low_price)
                     / self.last_kline.open_price * 100
                 ) if self.last_kline.open_price > 0 else 0,
+                # ✅ 上一K线边界触及状态
+                "last_touched_upper": self.last_kline.touched_upper,
+                "last_touched_lower": self.last_kline.touched_lower,
             })
         
         return stats
