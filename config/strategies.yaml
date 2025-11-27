@@ -443,32 +443,6 @@ strategies:
 # 全局配置
 # ========================================
 
-# 净值推送配置（推送到交易所）
-net_value_push:
-  enabled: true            # 全局开关：是否启用推送到交易所（默认关闭）
-  interval: 60              # 推送间隔（秒），建议60秒
-  retry_count: 3            # 推送失败重试次数
-  retry_backoff: true       # 启用指数退避重试（1s, 2s, 4s）
-  
-  # 环境配置（根据 --env 参数自动选择）
-  environments:
-    qa:
-      host: "https://sapi.xt-qa2.com"
-    uat:
-      host: "https://sapi.xt-uat.com"
-    prod:
-      host: "https://sapi.xt.com"
-  
-  # 策略Symbol映射（可选，不填则自动生成）
-  # 格式: 策略名 -> 交易所Symbol名称
-  symbol_mapping:
-    ton3l: "TON3L_USDT"
-    ton3s: "TON3S_USDT"
-    stg3l: "STG3L_USDT"
-    stg3s: "STG3S_USDT"
-    stg5l: "STG5L_USDT"
-    stg5s: "STG5S_USDT"
-
 # 数据库持久化配置
 database:
   # PostgreSQL 连接配置（通过环境变量设置）

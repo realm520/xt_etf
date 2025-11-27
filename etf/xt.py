@@ -718,7 +718,7 @@ class Spot:
 
         # 使用PUT方法发送请求
         res = self.req_put(url='/v4/etf/net-worth', params=params, auth=True)
-        logger.info(f"成功推送ETF净值到交易所: {symbol} = {net_worth}")
+        logger.debug(f"成功推送ETF净值到交易所: {symbol} = {net_worth}")
         return res
 
 
