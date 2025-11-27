@@ -47,8 +47,8 @@ strategies:
     bid_ask_spread: 0.008    # 0.8% 价差
 
     # 订单更新控制参数
-    price_change_threshold: 0.003  # 价格变化阈值 0.3%（减少不必要的订单更新）
-    min_update_interval: 30        # 最小更新间隔 30秒（防止过于频繁更新）
+    price_change_threshold: 0.0    # 价格变化阈值 0%（实时更新）
+    min_update_interval: 5         # 最小更新间隔 5秒（快速响应）
 
     # ========== 订单簿算法配置 ==========
     orderbook_algorithm: "layered"     # ✅ 使用分层订单簿算法（减少70%+ API调用）
@@ -152,8 +152,8 @@ strategies:
     bid_ask_spread: 0.008    # 0.8% 价差
 
     # 订单更新控制参数
-    price_change_threshold: 0.003  # 价格变化阈值 0.3%（减少不必要的订单更新）
-    min_update_interval: 30        # 最小更新间隔 30秒（防止过于频繁更新）
+    price_change_threshold: 0.0    # 价格变化阈值 0%（实时更新）
+    min_update_interval: 5         # 最小更新间隔 5秒（快速响应）
 
     # ========== 订单簿算法配置 ==========
     orderbook_algorithm: "layered"     # ✅ 使用分层订单簿算法（减少70%+ API调用）
@@ -245,6 +245,10 @@ strategies:
     anti_pin_rate: 0.2
     bid_ask_spread: 0.008    # 从1%改为0.8%，吸引真实交易
 
+    # 订单更新控制参数
+    price_change_threshold: 0.0    # 价格变化阈值 0%（实时更新）
+    min_update_interval: 5         # 最小更新间隔 5秒（快速响应）
+
     # ========== 订单簿算法配置 ==========
     orderbook_algorithm: "natural"
     orderbook_config:
@@ -311,6 +315,10 @@ strategies:
     anti_pin_usdt: 300
     anti_pin_rate: 0.2
     bid_ask_spread: 0.008    # 从1%改为0.8%，吸引真实交易
+
+    # 订单更新控制参数
+    price_change_threshold: 0.0    # 价格变化阈值 0%（实时更新）
+    min_update_interval: 5         # 最小更新间隔 5秒（快速响应）
 
     # ========== 订单簿算法配置 ==========
     orderbook_algorithm: "natural"
@@ -380,8 +388,8 @@ strategies:
     bid_ask_spread: 0.015    # 从1%改为1.5%，高杠杆需要更大价差保护
 
     # 订单更新控制参数
-    price_change_threshold: 0.005  # 价格变化阈值 0.5%（高杠杆更保守）
-    min_update_interval: 45        # 最小更新间隔 45秒（高杠杆更长冷却期）
+    price_change_threshold: 0.0    # 价格变化阈值 0%（实时更新）
+    min_update_interval: 5         # 最小更新间隔 5秒（快速响应）
 
     # ========== 订单簿算法配置 ==========
     orderbook_algorithm: "natural"
@@ -451,8 +459,8 @@ strategies:
     bid_ask_spread: 0.05    # STG5S 特有：保持5%价差（做空风险更高）
 
     # 订单更新控制参数
-    price_change_threshold: 0.005  # 价格变化阈值 0.5%（做空风险最高，更保守）
-    min_update_interval: 60        # 最小更新间隔 60秒（做空风险高，最长冷却期）
+    price_change_threshold: 0.0    # 价格变化阈值 0%（实时更新）
+    min_update_interval: 5         # 最小更新间隔 5秒（快速响应）
 
     # ========== 订单簿算法配置 ==========
     orderbook_algorithm: "natural"
