@@ -57,6 +57,318 @@ class WashOrderPair:
     last_check_time: float = 0.0
 
 
+@dataclass
+class MinuteKlineState:
+    """分钟K线状态
+    
+    追踪当前分钟的K线状态，用于生成连续自然的K线
+    
+    Attributes:
+        minute_ts: 分钟时间戳（如 1701234560）
+        open_price: 开盘价
+        high_price: 最高价
+        low_price: 最低价
+        close_price: 收盘价（当前最新成交价）
+        trade_count: 本分钟成交笔数
+        direction: 本分钟价格方向 (1=上涨, -1=下跌, 0=震荡)
+        target_amplitude: 本分钟目标振幅
+    """
+    minute_ts: int
+    open_price: float
+    high_price: float
+    low_price: float
+    close_price: float
+    trade_count: int = 0
+    direction: int = 0  # 1=上涨, -1=下跌, 0=震荡
+    target_amplitude: float = 0.002  # 目标振幅 0.2%
+
+
+class MinuteKlineManager:
+    """分钟K线管理器
+    
+    管理K线的连续性，确保：
+    1. 每分钟开盘价接近上一分钟收盘价
+    2. 价格在分钟内按一定方向演化
+    3. K线高低点分布自然
+    
+    Attributes:
+        symbol: 交易对
+        current_kline: 当前分钟的K线状态
+        last_kline: 上一分钟的K线状态
+        price_history: 最近N个成交价记录
+    """
+    
+    def __init__(self, symbol: str, max_history: int = 100):
+        """
+        初始化K线管理器
+        
+        Args:
+            symbol: 交易对
+            max_history: 保留的历史价格数量
+        """
+        self.symbol = symbol
+        self.current_kline: Optional[MinuteKlineState] = None
+        self.last_kline: Optional[MinuteKlineState] = None
+        self.price_history: List[float] = []
+        self.max_history = max_history
+        
+        # ✅ K线形态参数
+        self.consecutive_direction: int = 0  # 连续同向K线计数
+        self.max_consecutive: int = 5  # 最大连续同向数
+        
+    def get_current_minute(self) -> int:
+        """获取当前分钟时间戳"""
+        return int(time.time()) // 60 * 60
+    
+    def _choose_kline_pattern(self) -> Tuple[int, float]:
+        """选择本分钟K线形态
+        
+        Returns:
+            Tuple[int, float]: (方向, 目标振幅)
+            - 方向: 1=阳线(上涨), -1=阴线(下跌), 0=十字星(震荡)
+            - 目标振幅: 价格波动幅度（占价格的比例）
+        """
+        # 检查是否需要反转方向（防止连续同向太多）
+        force_reverse = abs(self.consecutive_direction) >= self.max_consecutive
+        
+        # K线类型概率分布（更自然的分布）
+        # - 50% 中等阳线/阴线（有实体的K线）
+        # - 25% 大阳线/大阴线（趋势延续）
+        # - 15% 十字星（方向不明）
+        # - 10% 长上影/长下影（假突破）
+        
+        rand = random.random()
+        
+        if rand < 0.30:
+            # 中等阳线：上涨0.1%-0.3%
+            direction = 1
+            amplitude = random.uniform(0.001, 0.003)
+        elif rand < 0.60:
+            # 中等阴线：下跌0.1%-0.3%
+            direction = -1
+            amplitude = random.uniform(0.001, 0.003)
+        elif rand < 0.75:
+            # 大阳线/延续上涨：上涨0.3%-0.6%
+            direction = 1
+            amplitude = random.uniform(0.003, 0.006)
+        elif rand < 0.90:
+            # 大阴线/延续下跌：下跌0.3%-0.6%
+            direction = -1
+            amplitude = random.uniform(0.003, 0.006)
+        else:
+            # 十字星/震荡：波动0.05%-0.15%
+            direction = 0
+            amplitude = random.uniform(0.0005, 0.0015)
+        
+        # 强制反转
+        if force_reverse and direction != 0:
+            if self.consecutive_direction > 0:
+                direction = -1  # 强制转阴
+            else:
+                direction = 1   # 强制转阳
+            logging.info(
+                f"🔄 K线方向强制反转: 连续{abs(self.consecutive_direction)}根同向后转向"
+            )
+        
+        return direction, amplitude
+    
+    def start_new_minute(self, open_price: float) -> MinuteKlineState:
+        """开始新的一分钟K线
+        
+        Args:
+            open_price: 开盘价（应接近上一分钟收盘价）
+            
+        Returns:
+            MinuteKlineState: 新的K线状态
+        """
+        # 保存上一分钟
+        if self.current_kline:
+            self.last_kline = self.current_kline
+            
+            # 更新连续方向计数
+            if self.last_kline.close_price > self.last_kline.open_price:
+                if self.consecutive_direction > 0:
+                    self.consecutive_direction += 1
+                else:
+                    self.consecutive_direction = 1
+            elif self.last_kline.close_price < self.last_kline.open_price:
+                if self.consecutive_direction < 0:
+                    self.consecutive_direction -= 1
+                else:
+                    self.consecutive_direction = -1
+            # 十字星不改变连续计数
+        
+        # 选择本分钟K线形态
+        direction, amplitude = self._choose_kline_pattern()
+        
+        # 创建新K线
+        minute_ts = self.get_current_minute()
+        self.current_kline = MinuteKlineState(
+            minute_ts=minute_ts,
+            open_price=open_price,
+            high_price=open_price,
+            low_price=open_price,
+            close_price=open_price,
+            trade_count=0,
+            direction=direction,
+            target_amplitude=amplitude
+        )
+        
+        logging.info(
+            f"📊 新K线开始: minute={minute_ts}, open={open_price:.6f}, "
+            f"方向={'阳线' if direction > 0 else '阴线' if direction < 0 else '十字星'}, "
+            f"目标振幅={amplitude*100:.2f}%, 连续同向={self.consecutive_direction}"
+        )
+        
+        return self.current_kline
+    
+    def update_trade(self, price: float) -> None:
+        """更新成交价到当前K线
+        
+        Args:
+            price: 成交价
+        """
+        if not self.current_kline:
+            return
+            
+        self.current_kline.high_price = max(self.current_kline.high_price, price)
+        self.current_kline.low_price = min(self.current_kline.low_price, price)
+        self.current_kline.close_price = price
+        self.current_kline.trade_count += 1
+        
+        # 记录价格历史
+        self.price_history.append(price)
+        if len(self.price_history) > self.max_history:
+            self.price_history.pop(0)
+    
+    def get_next_price_target(
+        self,
+        safe_min: float,
+        safe_max: float,
+        prec: int
+    ) -> float:
+        """获取下一笔成交的目标价格
+        
+        基于当前K线状态和安全区间，计算下一笔成交应该在哪个价位
+        
+        Args:
+            safe_min: 安全价格下限
+            safe_max: 安全价格上限
+            prec: 价格精度
+            
+        Returns:
+            float: 目标成交价
+        """
+        if not self.current_kline:
+            # 没有K线状态，返回中间价
+            return round((safe_min + safe_max) / 2, prec)
+        
+        kline = self.current_kline
+        last_price = kline.close_price
+        
+        # 根据K线方向和进度，计算目标价格
+        total_trades_expected = 6  # 假设每分钟6笔成交
+        progress = min(1.0, kline.trade_count / total_trades_expected)
+        
+        if kline.direction > 0:
+            # 阳线：价格逐渐上涨
+            # 前1/3时间可能先小跌（下影线），后2/3时间上涨
+            if progress < 0.3:
+                # 可能形成下影线
+                price_offset = -kline.target_amplitude * random.uniform(0, 0.5)
+            else:
+                # 主趋势上涨
+                trend_progress = (progress - 0.3) / 0.7
+                price_offset = kline.target_amplitude * trend_progress * random.uniform(0.7, 1.3)
+                
+        elif kline.direction < 0:
+            # 阴线：价格逐渐下跌
+            if progress < 0.3:
+                # 可能形成上影线
+                price_offset = kline.target_amplitude * random.uniform(0, 0.5)
+            else:
+                # 主趋势下跌
+                trend_progress = (progress - 0.3) / 0.7
+                price_offset = -kline.target_amplitude * trend_progress * random.uniform(0.7, 1.3)
+        else:
+            # 十字星：小幅随机波动
+            price_offset = kline.target_amplitude * random.uniform(-1, 1) * 0.5
+        
+        # 计算目标价格
+        target_price = kline.open_price * (1 + price_offset)
+        
+        # ✅ 关键：确保新价格与上一笔成交不要跳空太多（最大0.1%的跳跃）
+        max_gap = last_price * 0.001  # 最大0.1%的价格跳跃
+        target_price = max(last_price - max_gap, min(last_price + max_gap, target_price))
+        
+        # 限制在安全区间内
+        target_price = max(safe_min, min(safe_max, target_price))
+        
+        return round(target_price, prec)
+    
+    def check_new_minute(self, current_price: float) -> bool:
+        """检查是否需要开始新的一分钟
+        
+        Args:
+            current_price: 当前价格（用于新K线的开盘价参考）
+            
+        Returns:
+            bool: True表示开始了新的一分钟
+        """
+        current_minute = self.get_current_minute()
+        
+        if self.current_kline is None:
+            # 首次初始化
+            self.start_new_minute(current_price)
+            return True
+        
+        if current_minute > self.current_kline.minute_ts:
+            # 新的一分钟
+            # 开盘价 = 上一分钟收盘价 + 小幅随机（±0.02%）
+            last_close = self.current_kline.close_price
+            gap_noise = last_close * random.uniform(-0.0002, 0.0002)
+            new_open = last_close + gap_noise
+            
+            self.start_new_minute(new_open)
+            return True
+        
+        return False
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """获取K线统计信息"""
+        stats = {
+            "symbol": self.symbol,
+            "consecutive_direction": self.consecutive_direction,
+            "price_history_count": len(self.price_history),
+        }
+        
+        if self.current_kline:
+            stats.update({
+                "current_minute": self.current_kline.minute_ts,
+                "current_open": self.current_kline.open_price,
+                "current_high": self.current_kline.high_price,
+                "current_low": self.current_kline.low_price,
+                "current_close": self.current_kline.close_price,
+                "current_trades": self.current_kline.trade_count,
+                "current_direction": self.current_kline.direction,
+                "current_amplitude": (
+                    (self.current_kline.high_price - self.current_kline.low_price) 
+                    / self.current_kline.open_price * 100
+                ) if self.current_kline.open_price > 0 else 0,
+            })
+        
+        if self.last_kline:
+            stats.update({
+                "last_minute": self.last_kline.minute_ts,
+                "last_amplitude": (
+                    (self.last_kline.high_price - self.last_kline.low_price)
+                    / self.last_kline.open_price * 100
+                ) if self.last_kline.open_price > 0 else 0,
+            })
+        
+        return stats
+
+
 class WashOrderTracker:
     """
     洗盘订单追踪器
@@ -410,12 +722,8 @@ class WashController:
         self.order_tracker: Optional[WashOrderTracker] = None
         self._tracker_enabled: bool = True  # 是否启用订单追踪
         
-        # ✅ K线价格分散机制 - 让每分钟K线有自然的高低差
-        self._minute_price_targets: Dict[int, Dict[str, float]] = {}  # {minute_timestamp: {target_position, target_price}}
-        self._last_minute: int = 0  # 上一分钟的时间戳
-        self._minute_trade_count: int = 0  # 当前分钟内的交易计数
-        self._minute_high: float = 0.0  # 当前分钟最高价
-        self._minute_low: float = float('inf')  # 当前分钟最低价  # 是否启用订单追踪
+        # ✅ v3: K线连续性管理器 - 解决跳空和不连续问题
+        self.kline_manager: Optional[MinuteKlineManager] = None
     
     def init_order_tracker(
         self, 
@@ -765,10 +1073,11 @@ class WashController:
         """
         生成配对的洗盘交易（每对买卖价格数量相同，确保自成交）
 
-        ✅ K线自然化优化 v2:
-        - 随机选择K线形态：窄幅/中幅/宽幅
-        - 随机选择价格区域：高位/中位/低位
-        - 避免每根K线都触及买一卖一边界
+        ✅ K线自然化优化 v3:
+        - 使用K线管理器追踪分钟K线状态
+        - 价格连续性约束：新价格与上一笔不超过0.1%的跳跃
+        - K线方向演化：阳线/阴线/十字星自然切换
+        - 避免跳空：价格按照时间顺序平滑演化
 
         Args:
             buy_price: 安全区间下限
@@ -787,53 +1096,8 @@ class WashController:
         safe_min = buy_price
         safe_max = sell_price
         price_range = safe_max - safe_min
-        mid_price = (safe_min + safe_max) / 2
 
-        # ✅ K线形态随机化：决定本次洗盘的价格分布特征
-        # 形态类型及概率：
-        # - narrow_middle (40%): 窄幅中间震荡，价格集中在区间中部
-        # - narrow_high (15%): 窄幅高位，价格集中在区间上部
-        # - narrow_low (15%): 窄幅低位，价格集中在区间下部
-        # - medium_range (20%): 中等波动，覆盖区间的一半左右
-        # - wide_range (10%): 宽幅波动，接近触及边界
-        
-        pattern_roll = random.random()
-        if pattern_roll < 0.40:
-            # 窄幅中间：价格在区间中部30%范围内
-            pattern = "narrow_middle"
-            center = 0.5
-            spread = 0.15  # ±15%，即30%范围
-        elif pattern_roll < 0.55:
-            # 窄幅高位：价格在区间上部
-            pattern = "narrow_high"
-            center = random.uniform(0.65, 0.80)
-            spread = 0.12
-        elif pattern_roll < 0.70:
-            # 窄幅低位：价格在区间下部
-            pattern = "narrow_low"
-            center = random.uniform(0.20, 0.35)
-            spread = 0.12
-        elif pattern_roll < 0.90:
-            # 中等波动：覆盖区间约50%
-            pattern = "medium_range"
-            center = random.uniform(0.35, 0.65)
-            spread = 0.25
-        else:
-            # 宽幅波动（仅10%概率）：接近边界
-            pattern = "wide_range"
-            center = 0.5
-            spread = 0.40
-
-        # 计算本次洗盘的实际价格范围
-        range_low = max(0.02, center - spread)
-        range_high = min(0.98, center + spread)
-
-        logging.info(
-            f"🔍 [K线形态] {pattern}: 中心={center:.2f}, 范围=[{range_low:.2f}, {range_high:.2f}], "
-            f"安全区间=[{safe_min:.{prec}f}, {safe_max:.{prec}f}]"
-        )
-
-        # 1. 分配数量
+        # 1. 分配数量（使用Dirichlet分布）
         alpha = np.ones(num_pairs) * 2
         weights = np.random.dirichlet(alpha)
         
@@ -848,28 +1112,27 @@ class WashController:
             remaining -= qty
         quantities.append(round(max(min_qty, remaining), prec_amount))
 
-        # 2. 为每对生成价格（在选定的范围内）
+        # 2. 使用K线管理器生成连续价格
         paired_trades = []
         trade_prices = []
         
         for i, qty in enumerate(quantities):
-            if price_range > 0:
-                # 在选定范围内随机生成价格位置
-                position = random.uniform(range_low, range_high)
-                
-                # 应用趋势影响（轻微偏移）
-                if self.price_trend > 0:
-                    position = min(0.95, position + 0.05)
-                elif self.price_trend < 0:
-                    position = max(0.05, position - 0.05)
-                
-                price = safe_min + price_range * position
-                price = max(safe_min, min(safe_max, price))
-            else:
-                price = safe_min
+            # 获取K线管理器推荐的下一个价格
+            target_price = self.kline_manager.get_next_price_target(
+                safe_min=safe_min,
+                safe_max=safe_max,
+                prec=prec
+            )
             
-            price = round(price, prec)
+            # 添加微小随机扰动（±0.02%），保持自然感
+            noise = target_price * random.uniform(-0.0002, 0.0002)
+            price = round(target_price + noise, prec)
+            price = max(safe_min, min(safe_max, price))
+            
             trade_prices.append(price)
+            
+            # 更新K线管理器（模拟这笔成交）
+            self.kline_manager.update_trade(price)
             
             paired_trades.append({
                 "price": price,
@@ -881,17 +1144,26 @@ class WashController:
                 "quantity": qty,
                 "is_pair_start": False,
             })
+        
+        # 获取K线统计
+        kline_stats = self.kline_manager.get_stats()
+        logging.info(
+            f"📊 [K线状态] 方向={'阳' if kline_stats.get('current_direction', 0) > 0 else '阴' if kline_stats.get('current_direction', 0) < 0 else '十字'}, "
+            f"振幅={kline_stats.get('current_amplitude', 0):.3f}%, "
+            f"成交={kline_stats.get('current_trades', 0)}笔, "
+            f"连续同向={kline_stats.get('consecutive_direction', 0)}"
+        )
 
-        # 3. 日志
-        actual_high = max(trade_prices)
-        actual_low = min(trade_prices)
+        # 3. 日志统计
+        actual_high = max(trade_prices) if trade_prices else 0
+        actual_low = min(trade_prices) if trade_prices else 0
         actual_spread = actual_high - actual_low
         
         logging.info(
-            f"🔍 [步骤4完成] {num_pairs}对交易: "
+            f"🔍 [成交生成] {num_pairs}对交易: "
             f"价格=[{actual_low:.{prec}f}, {actual_high:.{prec}f}], "
             f"波动={actual_spread:.{prec}f}, "
-            f"占区间比例={actual_spread/price_range*100:.1f}%"
+            f"占区间比例={actual_spread/price_range*100:.1f}%" if price_range > 0 else f"波动={actual_spread:.{prec}f}"
         )
 
         return paired_trades
@@ -942,8 +1214,19 @@ class WashController:
             )
             return mid_price
 
+        # ✅ v3: 初始化K线管理器（首次调用时）
+        if self.kline_manager is None:
+            self.kline_manager = MinuteKlineManager(symbol)
+            logging.info(f"📊 K线管理器已初始化: {symbol}")
+
         # ✅ 获取上一笔成交价
         last_trade_price = self.get_last_trade_price(symbol)
+        
+        # ✅ v3: 检查是否需要开始新的一分钟K线
+        ref_price = last_trade_price if last_trade_price else mid_price
+        is_new_minute = self.kline_manager.check_new_minute(ref_price)
+        if is_new_minute:
+            logging.info(f"🕐 新分钟K线开始，开盘价={ref_price:.{prec}f}")
 
         # ✅ 生成连续K线价格（趋势+震荡）
         bid_ask_spread = config.get("bid_ask_spread", 0.008)
