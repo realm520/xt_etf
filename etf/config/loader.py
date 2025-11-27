@@ -6,7 +6,7 @@
 统一管理：
 - 策略配置 (strategies.yaml)
 - 环境变量 (.env)
-- API 密钥 (APIKey.json / APIKey.enc / 环境变量)
+- API 密钥 (仅从 .env 或环境变量加载)
 - 数据库配置
 """
 
@@ -229,20 +229,13 @@ def get_env(key: str, default: str = None) -> Optional[str]:
 def load_api_keys(
     strategy_name: Optional[str] = None,
     env: str = "prod",
-    apikey_file: str = "APIKey.json"
 ) -> Dict[str, str]:
     """
-    统一的 API 密钥加载
-    
-    加载优先级：
-    1. 环境变量 (access_key / secret_key)
-    2. 加密文件 (APIKey.enc) - 生产环境优先
-    3. JSON 文件 (APIKey.json) - 开发/测试环境
+    统一的 API 密钥加载（仅从 .env 或环境变量）
     
     Args:
-        strategy_name: 策略名称（如 "stg3l"），用于从多策略配置中选择
-        env: 环境 ("prod" / "qa")
-        apikey_file: API 密钥文件路径
+        strategy_name: 策略名称（已废弃，保留用于兼容）
+        env: 环境（已废弃，保留用于兼容）
         
     Returns:
         包含 access_key 和 secret_key 的字典
@@ -252,7 +245,6 @@ def load_api_keys(
     """
     init_env()  # 确保环境已初始化
     
-    # 方式1: 环境变量（最高优先级）
     access_key = os.getenv("access_key")
     secret_key = os.getenv("secret_key")
     
@@ -260,70 +252,10 @@ def load_api_keys(
         logging.info("✅ 从环境变量加载 API 密钥")
         return {"access_key": access_key, "secret_key": secret_key}
     
-    # 方式2: 加密文件（生产环境）
-    if env == "prod":
-        enc_file = Path(apikey_file).with_suffix('.enc')
-        if enc_file.exists():
-            try:
-                from etf.utils.crypto import load_api_keys as crypto_load
-                apikey = crypto_load(apikey_file)
-                
-                # 如果指定策略名，从多策略配置中选择
-                if strategy_name:
-                    key_name = f"xt_{strategy_name}"
-                    if key_name in apikey:
-                        logging.info(f"✅ 从加密文件加载 API 密钥: {key_name}")
-                        return apikey[key_name]
-                
-                # 返回第一个有效的密钥
-                for key, value in apikey.items():
-                    if isinstance(value, dict) and "access_key" in value:
-                        logging.info(f"✅ 从加密文件加载 API 密钥: {key}")
-                        return value
-                        
-            except Exception as e:
-                logging.warning(f"加载加密文件失败: {e}")
-    
-    # 方式3: JSON 文件
-    json_paths = [
-        Path(apikey_file),
-        Path.cwd() / apikey_file,
-        Path(__file__).parent.parent.parent / apikey_file,
-        Path.home() / ".config" / "xt_etf" / "APIKey.json",
-    ]
-    
-    for json_path in json_paths:
-        if json_path.exists():
-            try:
-                with open(json_path, "r", encoding="utf-8") as f:
-                    apikey = json.load(f)
-                
-                # 如果指定策略名，从多策略配置中选择
-                if strategy_name:
-                    key_name = f"xt_{strategy_name}"
-                    if key_name in apikey:
-                        logging.info(f"✅ 从 {json_path} 加载 API 密钥: {key_name}")
-                        return apikey[key_name]
-                
-                # 单策略文件格式
-                if "access_key" in apikey:
-                    logging.info(f"✅ 从 {json_path} 加载 API 密钥（单策略格式）")
-                    return apikey
-                
-                # 返回第一个有效的密钥
-                for key, value in apikey.items():
-                    if isinstance(value, dict) and "access_key" in value:
-                        logging.info(f"✅ 从 {json_path} 加载 API 密钥: {key}")
-                        return value
-                        
-            except Exception as e:
-                logging.warning(f"读取 {json_path} 失败: {e}")
-    
     raise ValueError(
-        "未找到有效的 API 密钥。请确保以下任一方式配置：\n"
-        "  1. 环境变量: access_key 和 secret_key\n"
-        "  2. .env 文件: access_key=xxx 和 secret_key=xxx\n"
-        f"  3. JSON 文件: {apikey_file}"
+        "未找到有效的 API 密钥。请配置：\n"
+        "  1. 在 .env 文件中设置: access_key=xxx 和 secret_key=xxx\n"
+        "  2. 或设置环境变量: export access_key=xxx && export secret_key=xxx"
     )
 
 
@@ -331,10 +263,9 @@ def load_binance_api_keys() -> Dict[str, str]:
     """
     加载 Binance API 密钥（用于对冲）
     
-    加载优先级：
-    1. 环境变量 (BN_ACCESS_KEY / BN_SECRET_KEY)
-    2. .env 文件 (bn_access_key / bn_secret_key)
-    3. APIKey.json 中的 "bn" 配置
+    从 .env 或环境变量加载:
+    - BN_ACCESS_KEY / bn_access_key
+    - BN_SECRET_KEY / bn_secret_key
     
     Returns:
         包含 access_key 和 secret_key 的字典
@@ -344,7 +275,6 @@ def load_binance_api_keys() -> Dict[str, str]:
     """
     init_env()
     
-    # 方式1: 环境变量
     access_key = os.getenv("BN_ACCESS_KEY") or os.getenv("bn_access_key")
     secret_key = os.getenv("BN_SECRET_KEY") or os.getenv("bn_secret_key")
     
@@ -352,31 +282,10 @@ def load_binance_api_keys() -> Dict[str, str]:
         logging.info("✅ 从环境变量加载 Binance API 密钥")
         return {"access_key": access_key, "secret_key": secret_key}
     
-    # 方式2: APIKey.json
-    json_paths = [
-        Path("APIKey.json"),
-        Path.cwd() / "APIKey.json",
-        Path.home() / ".config" / "xt_etf" / "APIKey.json",
-    ]
-    
-    for json_path in json_paths:
-        if json_path.exists():
-            try:
-                with open(json_path, "r", encoding="utf-8") as f:
-                    apikey = json.load(f)
-                
-                if "bn" in apikey and "access_key" in apikey["bn"]:
-                    logging.info(f"✅ 从 {json_path} 加载 Binance API 密钥")
-                    return apikey["bn"]
-                    
-            except Exception as e:
-                logging.warning(f"读取 {json_path} 失败: {e}")
-    
     raise ValueError(
-        "未找到 Binance API 密钥。请配置以下任一方式：\n"
-        "  1. 环境变量: BN_ACCESS_KEY 和 BN_SECRET_KEY\n"
-        "  2. .env 文件: bn_access_key=xxx 和 bn_secret_key=xxx\n"
-        "  3. APIKey.json 中添加 \"bn\" 配置"
+        "未找到 Binance API 密钥。请配置：\n"
+        "  1. 在 .env 文件中设置: bn_access_key=xxx 和 bn_secret_key=xxx\n"
+        "  2. 或设置环境变量: export BN_ACCESS_KEY=xxx && export BN_SECRET_KEY=xxx"
     )
 
 

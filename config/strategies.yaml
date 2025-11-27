@@ -7,7 +7,7 @@ strategies:
     prefix: "ton3l"
     env: "qa"
     clientOrderId: "1655"
-    apikey: "APIKey.json"
+
     bnsymbol: "TONUSDT"
     currencies: ["USDT", "TON3L", "TON3S"]
 
@@ -104,7 +104,7 @@ strategies:
     prefix: "ton3s"
     env: "qa"
     clientOrderId: "1655"
-    apikey: "APIKey.json"
+
     bnsymbol: "TONUSDT"
     currencies: ["USDT", "TON3S", "TON3L"]
 
@@ -200,7 +200,7 @@ strategies:
     prefix: "stg3l"
     env: "qa"
     clientOrderId: "1655"
-    apikey: "APIKey.json"
+
     bnsymbol: "STGUSDT"
     currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
 
@@ -259,7 +259,7 @@ strategies:
     prefix: "stg3s"
     env: "prod"
     clientOrderId: "1655"
-    apikey: "APIKey.json"
+
     bnsymbol: "STGUSDT"
     currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
 
@@ -318,7 +318,7 @@ strategies:
     prefix: "stg5l"
     env: "prod"
     clientOrderId: "1655"
-    apikey: "APIKey.json"
+
     bnsymbol: "STGUSDT"
     currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
 
@@ -381,7 +381,7 @@ strategies:
     prefix: "stg5s"
     env: "prod"
     clientOrderId: "1655"
-    apikey: "APIKey.json"
+
     bnsymbol: "STGUSDT"
     currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
 

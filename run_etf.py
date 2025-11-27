@@ -229,7 +229,7 @@ def get_parser():
         "--client-order-id", type=str, default="1655", help="Client order ID."
     )
     parser.add_argument(
-        "--apikey", type=str, default="APIKey.json", help="Path to API key file."
+        "--apikey", type=str, default="", help="Deprecated, use .env file instead."
     )
     parser.add_argument(
         "--enable-risk-controller",
@@ -370,9 +370,6 @@ def main():
         if args.client_order_id != parser.get_default("client_order_id")
         else strategy_config.get("clientOrderId", args.client_order_id),
         "symbol": prefix + "_usdt",
-        "apikey": args.apikey
-        if args.apikey != parser.get_default("apikey")
-        else strategy_config.get("apikey", args.apikey),
         "netvalue": "netvalue_" + prefix,
         "bnsymbol": prefix.upper()[:-2] + "USDT"
         if prefix
@@ -495,46 +492,42 @@ def main():
         )
         logging.info(f"✅ {env_name} 环境 API 密钥已加载 (access_key: {access_key[:4]}..., host: {api_host})")
 
-    elif config["env"] == "prod":
-        # 使用安全的 API 密钥加载器 - 生产环境强制使用加密密钥
-        from etf.utils.crypto import load_api_keys
+    else:  # prod 环境
+        # 生产环境也从 .env 文件或环境变量读取 API 密钥
+        import os
         from pathlib import Path
+        from dotenv import load_dotenv
 
-        # 检查是否存在加密文件
-        enc_file = Path(config["apikey"]).with_suffix('.enc')
-        plain_file = Path(config["apikey"])
+        # 显式查找 .env 文件
+        cwd = Path.cwd()
+        env_file = cwd / ".env"
 
-        if not enc_file.exists() and plain_file.exists():
+        if env_file.exists():
+            load_dotenv(env_file)
+            logging.info(f"✅ 已加载 .env 文件: {env_file}")
+        else:
+            load_dotenv()
+
+        access_key = os.getenv("access_key")
+        secret_key = os.getenv("secret_key")
+
+        if not access_key or not secret_key:
             logging.error("=" * 70)
-            logging.error("🚨 安全警告: 生产环境检测到明文 API 密钥!")
-            logging.error(f"明文文件: {plain_file}")
+            logging.error("🚨 错误: 未能从环境变量读取 API 密钥!")
+            logging.error(f"   当前工作目录: {cwd}")
             logging.error("=" * 70)
-            logging.error("请立即执行以下步骤加密您的 API 密钥:")
-            logging.error("1. 设置加密密码: export ETF_KEY_PASSWORD='your-secure-password'")
-            logging.error("2. 运行加密脚本: python scripts/encrypt_apikeys.py")
-            logging.error("3. 或使用命令: python -c \"from etf.utils.crypto import encrypt_api_keys; encrypt_api_keys('APIKey.json')\"")
+            logging.error("请配置 API 密钥:")
+            logging.error("  1. 在 .env 文件中设置: access_key=xxx 和 secret_key=xxx")
+            logging.error("  2. 或设置环境变量: export access_key=xxx && export secret_key=xxx")
             logging.error("=" * 70)
-            logging.error("为了安全，程序将在 10 秒后退出...")
-            logging.error("如需使用明文密钥（仅用于开发测试），请设置环境变量: ALLOW_PLAIN_KEYS=true")
+            raise RuntimeError("API 密钥未配置，程序已终止")
 
-            # 检查是否允许明文密钥（仅用于开发/测试）
-            if os.environ.get("ALLOW_PLAIN_KEYS", "").lower() != "true":
-                time.sleep(10)
-                raise RuntimeError("生产环境禁止使用明文 API 密钥，程序已终止")
-            else:
-                logging.warning("检测到 ALLOW_PLAIN_KEYS=true，允许使用明文密钥（仅用于开发/测试）")
-
-        try:
-            apikey = load_api_keys(config["apikey"])
-            spot = Spot(
-                host="https://sapi.xt.com",
-                access_key=apikey["xt_" + prefix]["access_key"],
-                secret_key=apikey["xt_" + prefix]["secret_key"],
-            )
-        except FileNotFoundError:
-            logging.error(f"错误: 找不到 API 密钥文件 {config['apikey']} 或对应的 .enc 文件")
-            logging.error("请确保密钥文件存在并已正确加密")
-            raise
+        spot = Spot(
+            host="https://sapi.xt.com",
+            access_key=access_key,
+            secret_key=secret_key,
+        )
+        logging.info(f"✅ 生产环境 API 密钥已加载 (access_key: {access_key[:4]}...)")
 
     # risk related
     risk_params = {

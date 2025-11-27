@@ -128,59 +128,42 @@ def main():
         "strategy_name": args.strategy,
     }
 
-    # 加载API密钥用于净值推送（优先级：.env > APIKey.json）
+    # 加载API密钥用于净值推送（从 .env 或环境变量）
     from dotenv import load_dotenv
-    load_dotenv()
-    
-    access_key_env = os.getenv("access_key")
-    secret_key_env = os.getenv("secret_key")
-    
-    if access_key_env and secret_key_env:
-        api_key = {
-            "access_key": access_key_env,
-            "secret_key": secret_key_env
-        }
-        logging.info("✅ 从 .env 文件加载API密钥")
+    # 显式从当前工作目录加载 .env 文件
+    env_path = os.path.join(os.getcwd(), ".env")
+    if os.path.exists(env_path):
+        load_dotenv(dotenv_path=env_path)
+        logging.info(f"✅ 从 {env_path} 加载环境变量")
     else:
-        # 从 APIKey.json 加载（降级方案）
-        api_key = None
-        api_key_file = strategy_config.get("apikey", "APIKey.json")
-        api_key_path = os.path.join(os.path.dirname(__file__), api_key_file)
-        
-        if os.path.exists(api_key_path):
-            with open(api_key_path, "r") as f:
-                api_keys = json.load(f)
-            
-            strategy_key = f"xt_{args.strategy}"
-            if strategy_key in api_keys:
-                api_key = api_keys[strategy_key]
-                logging.info(f"✅ 从 {api_key_file} 加载API密钥: {strategy_key}")
-            elif "access_key" in api_keys:
-                api_key = api_keys
-                logging.info(f"✅ 从 {api_key_file} 加载API密钥（单策略格式）")
+        load_dotenv()  # 降级到默认行为
     
-    # 配置净值推送（必须启用）
-    if api_key and api_key.get("access_key") and api_key.get("secret_key"):
-        # 根据环境选择主机地址
-        if args.env == "qa":
-            push_host = "https://sapi.xt-qa2.com"
-        elif args.env == "uat":
-            push_host = "https://sapi.xt-uat.com"
-        else:
-            push_host = "https://sapi.xt.com"
-        
-        net_value_params.update({
-            "push_host": push_host,
-            "push_access_key": api_key.get("access_key"),
-            "push_secret_key": api_key.get("secret_key"),
-        })
-        logging.info(f"✅ 净值推送已启用 - 主机: {push_host}")
-    else:
+    access_key = os.getenv("access_key")
+    secret_key = os.getenv("secret_key")
+    
+    if not access_key or not secret_key:
         logging.error("❌ 未找到有效的API密钥，净值推送无法启用")
-        logging.error("请确保以下任一方式配置API密钥:")
+        logging.error("请配置API密钥:")
         logging.error("  1. 在 .env 文件中设置: access_key=xxx 和 secret_key=xxx")
-        logging.error("  2. 在 APIKey.json 文件中配置相应的密钥")
+        logging.error("  2. 或设置环境变量: export access_key=xxx && export secret_key=xxx")
         raise ValueError("API密钥配置缺失，无法启动净值推送")
+    
+    logging.info("✅ 从环境变量加载API密钥")
+    
+    # 根据环境选择主机地址
+    if args.env == "qa":
+        push_host = "https://sapi.xt-qa2.com"
+    elif args.env == "uat":
+        push_host = "https://sapi.xt-uat.com"
+    else:
+        push_host = "https://sapi.xt.com"
+    
+    net_value_params.update({
+        "push_host": push_host,
+        "push_access_key": access_key,
+        "push_secret_key": secret_key,
+    })
+    logging.info(f"✅ 净值推送已启用 - 主机: {push_host}")
 
     # 日志输出配置信息
     logging.info(f"启动净值计算器 - 策略: {args.strategy}")

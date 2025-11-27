@@ -11,10 +11,9 @@ def _load_binance_keys():
     """
     加载 Binance API 密钥（使用统一配置加载器）
     
-    加载优先级：
-    1. 环境变量 BN_ACCESS_KEY / BN_SECRET_KEY
-    2. .env 文件中的 bn_access_key / bn_secret_key
-    3. APIKey.json 文件
+    从 .env 或环境变量加载:
+    - BN_ACCESS_KEY / bn_access_key
+    - BN_SECRET_KEY / bn_secret_key
     """
     try:
         from etf.config import load_binance_api_keys

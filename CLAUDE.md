@@ -460,21 +460,9 @@ CANCEL_ORDERS_ON_EXIT=true  # true: 退出时撤单, false: 保留订单
 **优势**:
 - ✅ 不会误提交到Git（已在 `.gitignore` 中）
 - ✅ 更安全，统一管理
-- ✅ 优先级高于 `APIKey.json`
+- ✅ 唯一支持的配置方式（APIKey.json 已废弃）
 
-**方式2: 使用 APIKey.json 文件（降级方案）**
-
-仅在无法使用 `.env` 时使用：
-```json
-{
-  "xt_ton3l": {
-    "access_key": "your_access_key",
-    "secret_key": "your_secret_key"
-  }
-}
-```
-
-**详细配置说明**: 参见 [docs/ENV_CONFIGURATION.md](docs/ENV_CONFIGURATION.md)
+**注意**: `APIKey.json` 和加密文件 `APIKey.enc` 已被废弃，所有 API 密钥配置统一使用 `.env` 文件或环境变量。
 
 #### 其他配置
 
