@@ -262,6 +262,17 @@ class StopLossManager:
 
         # ⚡ 价格合理性检查：防止价格数据异常导致虚假止损触发
         # 检查当前价格相对于入场价的变化幅度
+        # 保护：入场价为0时跳过检查
+        if position.entry_price <= 0:
+            logger.warning(f"⚠️ 入场价异常: entry_price={position.entry_price}, 跳过止损检查")
+            return StopLossResult(
+                triggered=False,
+                action=StopLossAction.NONE,
+                reason=f"入场价异常: {position.entry_price}",
+                loss_rate=0.0,
+                position_to_close=0.0
+            )
+        
         price_change_rate = abs(position.current_price - position.entry_price) / position.entry_price
         if price_change_rate > 0.15:  # 单次变化超过15%视为异常
             logger.warning(
