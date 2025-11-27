@@ -174,19 +174,28 @@ class OrderWebSocketClient:
             
             # 使用client获取listenKey
             result = self.client.get_listen_key()
-            if result and isinstance(result, str):
-                logger.info(f"成功获取listenKey: {result[:20]}...")
-                return result
-            elif result and isinstance(result, dict) and 'accessToken' in result:
-                listen_key = result['accessToken']
-                logger.info(f"成功获取listenKey: {listen_key[:20]}...")
+            logger.debug(f"get_listen_key API返回: type={type(result)}, value={repr(result)}")
+            
+            listen_key = None
+            
+            if result and isinstance(result, str) and len(result) > 10:
+                listen_key = result
+            elif result and isinstance(result, dict):
+                # 尝试多种可能的字段名
+                for key in ['accessToken', 'listenKey', 'token', 'jwt']:
+                    if key in result and result[key]:
+                        listen_key = result[key]
+                        break
+            
+            if listen_key and isinstance(listen_key, str) and len(listen_key) > 10:
+                logger.info(f"成功获取listenKey: {listen_key[:20]}... (长度: {len(listen_key)})")
                 return listen_key
             else:
-                logger.warning(f"获取listenKey返回格式异常: {result}")
+                logger.error(f"获取listenKey返回格式异常或为空: {repr(result)}")
                 return None
 
         except Exception as e:
-            logger.error(f"获取listenKey失败: {e}")
+            logger.error(f"获取listenKey失败: {e}", exc_info=True)
             return None
 
     async def _keep_alive_listen_key(self):
@@ -281,6 +290,12 @@ class OrderWebSocketClient:
         """
         # 订阅订单和成交频道（不需要指定symbol，会推送账户下所有订单）
         # 订阅消息必须包含 listenKey
+        
+        # 验证 listenKey 有效性
+        if not self._listen_key or not isinstance(self._listen_key, str) or len(self._listen_key) < 10:
+            logger.error(f"listenKey 无效: {repr(self._listen_key)}, 无法订阅订单流")
+            raise ValueError(f"Invalid listenKey: {repr(self._listen_key)}")
+        
         subscribe_msg = {
             "method": "subscribe",
             "params": ["order", "trade"],
@@ -288,6 +303,7 @@ class OrderWebSocketClient:
             "id": str(int(time.time() * 1000))
         }
 
+        logger.info(f"发送订阅消息, listenKey长度: {len(self._listen_key)}, 前20字符: {self._listen_key[:20]}...")
         await self._ws.send(json.dumps(subscribe_msg))
         logger.info(f"已订阅订单和成交更新流: order, trade (账户级别，过滤symbol: {self.symbol})")
 

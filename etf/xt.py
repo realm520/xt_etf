@@ -647,9 +647,17 @@ class Spot:
         return res['result']
 
     def get_listen_key(self):
+        """
+        获取WebSocket认证的listenKey
+        
+        Returns:
+            str or dict: listenKey字符串或包含accessToken的字典
+        """
         params = {}
         res = self.req_post('/v4/ws-token', params, auth=True)
-        return res['result']
+        result = res.get('result')
+        logger.debug(f"get_listen_key API响应: rc={res.get('rc')}, result_type={type(result)}, result={repr(result)[:100]}")
+        return result
 
     def withdraw(self, currency, chain, amount, address):
         """
