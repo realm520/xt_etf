@@ -145,6 +145,13 @@ class LayeredOrderbookAlgorithm(OrderbookAlgorithm):
 
         # 首次运行标志
         self.first_run = True
+        
+        # ✅ 盘口不对称机制
+        # asymmetry_bias: 正值=卖一更近净值, 负值=买一更近净值
+        # 范围: -0.5 ~ +0.5 (对应 base_spread 的偏移比例)
+        self.asymmetry_bias: float = 0.0
+        self.last_bias_update: float = 0.0
+        self.bias_update_interval: float = 60.0  # 每60秒更新一次偏移
 
     def validate_config(self):
         """验证配置"""
@@ -221,14 +228,44 @@ class LayeredOrderbookAlgorithm(OrderbookAlgorithm):
             Tuple[List[OrderLevel], List[OrderLevel]]: (买盘订单, 卖盘订单)
         """
         layer_config = getattr(self.config, layer_name)
+        current_time = time.time()
+
+        # ✅ 更新盘口不对称偏移（仅在近盘口层使用）
+        if layer_name == "near_book":
+            if current_time - self.last_bias_update >= self.bias_update_interval:
+                # 生成新的不对称偏移: -0.4 ~ +0.4
+                # 正值: 卖一更近净值（买方市场），负值: 买一更近净值（卖方市场）
+                self.asymmetry_bias = np.random.uniform(-0.4, 0.4)
+                self.last_bias_update = current_time
+                logging.debug(
+                    f"🔄 盘口不对称偏移更新: {self.asymmetry_bias:+.2f} "
+                    f"({'卖一更近' if self.asymmetry_bias > 0 else '买一更近'})"
+                )
 
         # 计算该层的价格范围
         if layer_name == "near_book":
-            # 近盘口：净值 ± distance_threshold
-            ask_start = netvalue * (1 + 0.001)  # 从0.1%开始
-            ask_end = netvalue * (1 + layer_config.distance_threshold)
-            bid_start = netvalue * (1 - layer_config.distance_threshold)
-            bid_end = netvalue * (1 - 0.001)
+            # 近盘口：净值 ± distance_threshold，应用不对称偏移
+            base_spread = layer_config.distance_threshold
+            
+            # ✅ 计算不对称的买卖起始位置
+            # asymmetry_bias > 0: 卖一距离缩小，买一距离扩大
+            # asymmetry_bias < 0: 买一距离缩小，卖一距离扩大
+            ask_base = 0.001 * (1 - self.asymmetry_bias * 0.5)  # 卖一起始点
+            bid_base = 0.001 * (1 + self.asymmetry_bias * 0.5)  # 买一起始点
+            
+            # 确保最小距离不小于0.0005 (0.05%)
+            ask_base = max(0.0005, ask_base)
+            bid_base = max(0.0005, bid_base)
+            
+            ask_start = netvalue * (1 + ask_base)
+            ask_end = netvalue * (1 + base_spread)
+            bid_start = netvalue * (1 - base_spread)
+            bid_end = netvalue * (1 - bid_base)
+            
+            logging.debug(
+                f"📊 近盘口价格范围: 卖一={ask_start:.6f} (距净值{ask_base*100:.3f}%), "
+                f"买一={bid_end:.6f} (距净值{bid_base*100:.3f}%)"
+            )
         else:
             # 过渡区和远盘口：使用distance_range
             range_start, range_end = layer_config.distance_range

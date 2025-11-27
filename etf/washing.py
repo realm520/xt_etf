@@ -409,6 +409,13 @@ class WashController:
         # ✅ 洗盘订单追踪器 - 检测和处理孤儿订单
         self.order_tracker: Optional[WashOrderTracker] = None
         self._tracker_enabled: bool = True  # 是否启用订单追踪
+        
+        # ✅ K线价格分散机制 - 让每分钟K线有自然的高低差
+        self._minute_price_targets: Dict[int, Dict[str, float]] = {}  # {minute_timestamp: {target_position, target_price}}
+        self._last_minute: int = 0  # 上一分钟的时间戳
+        self._minute_trade_count: int = 0  # 当前分钟内的交易计数
+        self._minute_high: float = 0.0  # 当前分钟最高价
+        self._minute_low: float = float('inf')  # 当前分钟最低价  # 是否启用订单追踪
     
     def init_order_tracker(
         self, 
@@ -758,105 +765,133 @@ class WashController:
         """
         生成配对的洗盘交易（每对买卖价格数量相同，确保自成交）
 
-        每对交易包含一个买单和一个卖单，价格和数量完全相同，
-        这样交易所会自动撮合成交，不会影响做市商订单。
+        ✅ K线自然化优化 v2:
+        - 随机选择K线形态：窄幅/中幅/宽幅
+        - 随机选择价格区域：高位/中位/低位
+        - 避免每根K线都触及买一卖一边界
 
         Args:
-            buy_price: 安全区间下限（原参数名保留兼容）
-            sell_price: 安全区间上限（原参数名保留兼容）
+            buy_price: 安全区间下限
+            sell_price: 安全区间上限
             total_amount: 总交易量
             prec: 价格精度
             prec_amount: 数量精度
             config: 策略配置
 
         Returns:
-            List[Dict]: 配对交易列表，每个元素包含 price, quantity, is_pair_start
-                       is_pair_start=True 表示这是一对的开始（买单）
-                       is_pair_start=False 表示这是配对的卖单
+            List[Dict]: 配对交易列表
         """
-        # 从配置读取交易对数量，默认2-4对
         num_pairs = config.get("wash_pairs_count", random.randint(2, 4))
-        num_pairs = max(2, min(5, num_pairs))  # 限制2-5对
+        num_pairs = max(2, min(5, num_pairs))
 
-        safe_min = buy_price  # 安全区间下限
-        safe_max = sell_price  # 安全区间上限
+        safe_min = buy_price
+        safe_max = sell_price
         price_range = safe_max - safe_min
+        mid_price = (safe_min + safe_max) / 2
+
+        # ✅ K线形态随机化：决定本次洗盘的价格分布特征
+        # 形态类型及概率：
+        # - narrow_middle (40%): 窄幅中间震荡，价格集中在区间中部
+        # - narrow_high (15%): 窄幅高位，价格集中在区间上部
+        # - narrow_low (15%): 窄幅低位，价格集中在区间下部
+        # - medium_range (20%): 中等波动，覆盖区间的一半左右
+        # - wide_range (10%): 宽幅波动，接近触及边界
+        
+        pattern_roll = random.random()
+        if pattern_roll < 0.40:
+            # 窄幅中间：价格在区间中部30%范围内
+            pattern = "narrow_middle"
+            center = 0.5
+            spread = 0.15  # ±15%，即30%范围
+        elif pattern_roll < 0.55:
+            # 窄幅高位：价格在区间上部
+            pattern = "narrow_high"
+            center = random.uniform(0.65, 0.80)
+            spread = 0.12
+        elif pattern_roll < 0.70:
+            # 窄幅低位：价格在区间下部
+            pattern = "narrow_low"
+            center = random.uniform(0.20, 0.35)
+            spread = 0.12
+        elif pattern_roll < 0.90:
+            # 中等波动：覆盖区间约50%
+            pattern = "medium_range"
+            center = random.uniform(0.35, 0.65)
+            spread = 0.25
+        else:
+            # 宽幅波动（仅10%概率）：接近边界
+            pattern = "wide_range"
+            center = 0.5
+            spread = 0.40
+
+        # 计算本次洗盘的实际价格范围
+        range_low = max(0.02, center - spread)
+        range_high = min(0.98, center + spread)
 
         logging.info(
-            f"🔍 [步骤4] 生成{num_pairs}对配对交易: "
-            f"安全区间=[{safe_min:.{prec}f}, {safe_max:.{prec}f}], "
-            f"区间宽度={price_range:.{prec}f}"
+            f"🔍 [K线形态] {pattern}: 中心={center:.2f}, 范围=[{range_low:.2f}, {range_high:.2f}], "
+            f"安全区间=[{safe_min:.{prec}f}, {safe_max:.{prec}f}]"
         )
 
-        # 1. 分配数量给每对（使用Dirichlet分布）
-        alpha = np.ones(num_pairs) * 2  # 稍微集中的分布
+        # 1. 分配数量
+        alpha = np.ones(num_pairs) * 2
         weights = np.random.dirichlet(alpha)
         
         quantities = []
         remaining = total_amount
-        min_qty = max(0.01, 10 ** (-prec_amount))  # 最小数量
+        min_qty = max(0.01, 10 ** (-prec_amount))
         
         for i, weight in enumerate(weights[:-1]):
             qty = round(total_amount * weight, prec_amount)
             qty = max(min_qty, min(qty, remaining - (num_pairs - i - 1) * min_qty))
             quantities.append(qty)
             remaining -= qty
-        
-        # 最后一对用剩余量
         quantities.append(round(max(min_qty, remaining), prec_amount))
 
-        # 2. 为每对生成价格（在安全区间内）
+        # 2. 为每对生成价格（在选定的范围内）
         paired_trades = []
+        trade_prices = []
         
         for i, qty in enumerate(quantities):
             if price_range > 0:
-                # 根据趋势决定价格分布
-                if self.price_trend > 0:
-                    # 上涨趋势：价格逐步上升
-                    progress = (i + 0.5) / num_pairs
-                    noise = random.uniform(-0.1, 0.1)
-                    price = safe_min + price_range * (progress + noise)
-                elif self.price_trend < 0:
-                    # 下跌趋势：价格逐步下降
-                    progress = 1 - (i + 0.5) / num_pairs
-                    noise = random.uniform(-0.1, 0.1)
-                    price = safe_min + price_range * (progress + noise)
-                else:
-                    # 震荡：随机分布
-                    price = safe_min + price_range * random.random()
+                # 在选定范围内随机生成价格位置
+                position = random.uniform(range_low, range_high)
                 
-                # 确保价格在安全区间内
+                # 应用趋势影响（轻微偏移）
+                if self.price_trend > 0:
+                    position = min(0.95, position + 0.05)
+                elif self.price_trend < 0:
+                    position = max(0.05, position - 0.05)
+                
+                price = safe_min + price_range * position
                 price = max(safe_min, min(safe_max, price))
             else:
-                # 区间为0，使用同一价格
                 price = safe_min
             
             price = round(price, prec)
+            trade_prices.append(price)
             
-            # 添加买单（配对开始）
             paired_trades.append({
                 "price": price,
                 "quantity": qty,
-                "is_pair_start": True,  # 标记为买单
+                "is_pair_start": True,
             })
-            
-            # 添加卖单（配对结束，同价同量）
             paired_trades.append({
                 "price": price,
                 "quantity": qty,
-                "is_pair_start": False,  # 标记为卖单
+                "is_pair_start": False,
             })
 
-        # 3. 日志：显示配对信息
-        pair_info = []
-        for i in range(0, len(paired_trades), 2):
-            buy = paired_trades[i]
-            sell = paired_trades[i + 1]
-            pair_info.append(f"({buy['price']:.{prec}f}, {buy['quantity']})")
+        # 3. 日志
+        actual_high = max(trade_prices)
+        actual_low = min(trade_prices)
+        actual_spread = actual_high - actual_low
         
         logging.info(
-            f"🔍 [步骤4完成] 配对交易: {pair_info}, "
-            f"总量={sum(t['quantity'] for t in paired_trades[::2]):.{prec_amount}f}"
+            f"🔍 [步骤4完成] {num_pairs}对交易: "
+            f"价格=[{actual_low:.{prec}f}, {actual_high:.{prec}f}], "
+            f"波动={actual_spread:.{prec}f}, "
+            f"占区间比例={actual_spread/price_range*100:.1f}%"
         )
 
         return paired_trades
