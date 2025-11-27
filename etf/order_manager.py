@@ -279,9 +279,13 @@ class OrderManager:
             client_host = getattr(self.client, 'host', None)
             logging.info(f"客户端host: {client_host}")
             if client_host:
-                if 'qa2' in client_host.lower():
+                host_lower = client_host.lower()
+                if 'qa2' in host_lower:
                     ws_url = "wss://stream.xt-qa2.com/private"
                     logging.info(f"检测到QA2环境，使用WebSocket URL: {ws_url}")
+                elif 'uat' in host_lower:
+                    ws_url = "wss://stream.xt-uat.com/private"
+                    logging.info(f"检测到UAT环境，使用WebSocket URL: {ws_url}")
                 else:
                     logging.info(f"生产环境，使用WebSocket URL: {ws_url}")
             

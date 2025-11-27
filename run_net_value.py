@@ -81,9 +81,9 @@ def main():
     parser.add_argument(
         "--env",
         type=str,
-        choices=["qa", "prod"],
+        choices=["qa", "uat", "prod"],
         default="prod",
-        help="运行环境 (qa/prod)，默认: prod",
+        help="运行环境 (qa/uat/prod)，默认: prod",
     )
 
     # 可选参数（可覆盖配置文件中的值）
@@ -179,6 +179,8 @@ def main():
             env_config = global_push_config.get("environments", {})
             if args.env == "qa":
                 push_host = env_config.get("qa", {}).get("host", "https://sapi.xt-qa2.com")
+            elif args.env == "uat":
+                push_host = env_config.get("uat", {}).get("host", "https://sapi.xt-uat.com")
             else:
                 push_host = env_config.get("prod", {}).get("host", "https://sapi.xt.com")
             

@@ -89,14 +89,6 @@ strategies:
     max_single_change: 0.10  # 最大单次变化率限制
     max_restart_gap: 300     # 最大重启间隔（秒）
 
-    # 止损配置
-    stop_loss:
-      enabled: true          # 是否启用止损
-      fixed_threshold: -0.02 # 固定止损阈值 -2%
-      trailing_stop: 0.01    # 移动止损 1%
-      time_stop: 24          # 时间止损（小时）
-      cooldown: 60           # 止损后冷却时间（分钟）
-      enable_partial_close: true  # 是否启用部分平仓
 
     # 资金检查配置
     balance_check:
@@ -194,14 +186,6 @@ strategies:
     max_single_change: 0.10  # 最大单次变化率限制
     max_restart_gap: 300     # 最大重启间隔（秒）
 
-    # 止损配置
-    stop_loss:
-      enabled: true          # 是否启用止损
-      fixed_threshold: -0.02 # 固定止损阈值 -2%
-      trailing_stop: 0.01    # 移动止损 1%
-      time_stop: 24          # 时间止损（小时）
-      cooldown: 60           # 止损后冷却时间（分钟）
-      enable_partial_close: true  # 是否启用部分平仓
 
     # 资金检查配置
     balance_check:
@@ -261,14 +245,6 @@ strategies:
     max_single_change: 0.10  # 最大单次变化率限制
     max_restart_gap: 300     # 最大重启间隔（秒）
     
-    # 止损配置
-    stop_loss:
-      enabled: true          # 是否启用止损
-      fixed_threshold: -0.02 # 固定止损阈值 -2%
-      trailing_stop: 0.01    # 移动止损 1%
-      time_stop: 24          # 时间止损（小时）
-      cooldown: 60           # 止损后冷却时间（分钟）
-      enable_partial_close: true  # 是否启用部分平仓
 
     # 资金检查配置
     balance_check:
@@ -328,14 +304,6 @@ strategies:
     max_single_change: 0.10  # 最大单次变化率限制
     max_restart_gap: 300     # 最大重启间隔（秒）
 
-    # 止损配置
-    stop_loss:
-      enabled: true          # 是否启用止损
-      fixed_threshold: -0.02 # 固定止损阈值 -2%
-      trailing_stop: 0.01    # 移动止损 1%
-      time_stop: 24          # 时间止损（小时）
-      cooldown: 60           # 止损后冷却时间（分钟）
-      enable_partial_close: true  # 是否启用部分平仓
 
     # 资金检查配置
     balance_check:
@@ -399,14 +367,6 @@ strategies:
     max_single_change: 0.10  # 最大单次变化率限制
     max_restart_gap: 300     # 最大重启间隔（秒）
     
-    # 止损配置 - 5x杠杆做多，更严格的止损
-    stop_loss:
-      enabled: true          # 是否启用止损
-      fixed_threshold: -0.015 # 固定止损阈值 -1.5% (5x杠杆更严格)
-      trailing_stop: 0.008    # 移动止损 0.8%
-      time_stop: 12          # 时间止损 12小时（高杠杆缩短持仓时间）
-      cooldown: 60           # 止损后冷却时间（分钟）
-      enable_partial_close: true  # 是否启用部分平仓
 
     # 资金检查配置
     balance_check:
@@ -470,14 +430,6 @@ strategies:
     max_single_change: 0.10  # 最大单次变化率限制
     max_restart_gap: 300     # 最大重启间隔（秒）
 
-    # 止损配置 - 5x杠杆做空，最严格的止损（做空风险最高）
-    stop_loss:
-      enabled: true          # 是否启用止损
-      fixed_threshold: -0.01 # 固定止损阈值 -1% (做空风险最高，最严格)
-      trailing_stop: 0.005   # 移动止损 0.5%
-      time_stop: 8           # 时间止损 8小时（做空风险高，更短持仓时间）
-      cooldown: 60           # 止损后冷却时间（分钟）
-      enable_partial_close: true  # 是否启用部分平仓
 
     # 资金检查配置
     balance_check:
@@ -502,6 +454,8 @@ net_value_push:
   environments:
     qa:
       host: "https://sapi.xt-qa2.com"
+    uat:
+      host: "https://sapi.xt-uat.com"
     prod:
       host: "https://sapi.xt.com"
   

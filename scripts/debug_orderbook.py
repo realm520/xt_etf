@@ -46,6 +46,9 @@ class OrderbookDebugger:
         if env == "qa":
             self.ws_url = "wss://stream.xt-qa2.com/public"
             self.rest_base_url = "https://sapi.xt-qa2.com"
+        elif env == "uat":
+            self.ws_url = "wss://stream.xt-uat.com/public"
+            self.rest_base_url = "https://sapi.xt-uat.com"
         else:
             self.ws_url = "wss://stream.xt.com/public"
             self.rest_base_url = "https://sapi.xt.com"
@@ -227,7 +230,7 @@ async def main():
     
     parser = argparse.ArgumentParser(description="订单簿调试工具")
     parser.add_argument("--symbol", default="ton3s_usdt", help="交易对符号")
-    parser.add_argument("--env", default="qa", choices=["qa", "prod"], help="环境")
+    parser.add_argument("--env", default="qa", choices=["qa", "uat", "prod"], help="环境")
     parser.add_argument("--mode", default="all", choices=["rest", "ws", "all"], help="测试模式")
     parser.add_argument("--duration", type=int, default=10, help="WebSocket监听时长（秒）")
     

@@ -34,6 +34,8 @@ if __name__ == "__main__":
     # 根据环境选择主机
     if config["env"] == "qa":
         host = "https://sapi.xt-qa2.com"
+    elif config["env"] == "uat":
+        host = "https://sapi.xt-uat.com"
     else:
         host = "https://sapi.xt.com"
     

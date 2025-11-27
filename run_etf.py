@@ -151,127 +151,7 @@ class EtfStrategy:
                         logging.warning(f"风险监控失败: {e}")
                         # 保持当前风险等级，继续运行
 
-                # ✅ 持仓信息更新（用于止损计算）
-                # 注意：get_position3使用REST API获取价格，不依赖depth数据
-                if risk_controller.stop_loss_manager and config.get("currencies"):
-                    try:
-                        # 获取当前持仓信息
-                        delta_pos, position, mid_price, delta_amt = market_maker.order_manager.get_position3(
-                            config["symbol"], config["currencies"]
-                        )
-
-                        # 判断是否有持仓
-                        if abs(delta_amt) > 0.01:  # 持仓量阈值
-                            # 确定持仓方向（做多/做空）
-                            # ETF命名规则: stg3l = 3倍做多, stg3s = 3倍做空
-                            symbol_lower = config["symbol"].lower()
-                            side = "short" if symbol_lower.endswith("s_usdt") else "long"
-
-                            # ⚡ 改进的入场价计算逻辑
-                            # 1. 首先检查 delta_amt 是否足够大，避免除以极小数
-                            MIN_DELTA_AMT_THRESHOLD = 0.05  # 最小持仓量阈值，低于此值不计算入场价
-
-                            if market_maker.order_manager.init_amount and market_maker.order_manager.init_amount != 0 and abs(delta_amt) >= MIN_DELTA_AMT_THRESHOLD:
-                                # delta_amt 足够大，可以安全计算入场价
-                                calculated_entry = (position - market_maker.order_manager.init_amount * mid_price) / delta_amt
-
-                                # 2. 多重价格合理性检查
-                                # 检查1: 入场价必须为正数
-                                if calculated_entry <= 0:
-                                    logging.warning(
-                                        f"⚠️ 入场价计算结果为负或零: calculated={calculated_entry:.4f}, "
-                                        f"使用当前价 {mid_price:.4f} 作为入场价"
-                                    )
-                                    entry_price = mid_price
-                                else:
-                                    # 检查2: 入场价不应偏离当前价超过 ±30% (从50%降至30%，更严格)
-                                    price_deviation = abs(calculated_entry - mid_price) / mid_price if mid_price != 0 else float('inf')
-                                    if price_deviation > 0.30:  # 30% 阈值
-                                        logging.warning(
-                                            f"⚠️ 入场价偏差过大: calculated={calculated_entry:.4f}, "
-                                            f"mid_price={mid_price:.4f}, deviation={price_deviation:.2%} (阈值30%), "
-                                            f"delta_amt={delta_amt:.6f}, position={position:.2f}, "
-                                            f"init_amt={market_maker.order_manager.init_amount:.2f}, 使用当前价作为入场价"
-                                        )
-                                        entry_price = mid_price  # 回退到安全值
-                                    else:
-                                        # 通过所有检查，使用计算的入场价
-                                        entry_price = abs(calculated_entry)
-                                        logging.debug(
-                                            f"✅ 入场价计算正常: entry={entry_price:.4f}, "
-                                            f"current={mid_price:.4f}, deviation={price_deviation:.2%}"
-                                        )
-                            else:
-                                # delta_amt 太小或 init_amount 无效，直接使用当前价
-                                if abs(delta_amt) < MIN_DELTA_AMT_THRESHOLD:
-                                    logging.info(
-                                        f"ℹ️ 持仓量过小 ({abs(delta_amt):.6f} < {MIN_DELTA_AMT_THRESHOLD}), "
-                                        f"使用当前价 {mid_price:.4f} 作为入场价"
-                                    )
-                                entry_price = mid_price
-
-                            # 3. 最终安全检查：确保 entry_price 为正数且合理
-                            if entry_price <= 0 or entry_price > mid_price * 2 or entry_price < mid_price * 0.5:
-                                logging.error(
-                                    f"🚨 入场价最终检查失败: entry={entry_price:.4f}, "
-                                    f"current={mid_price:.4f}, 强制使用当前价"
-                                )
-                                entry_price = mid_price
-
-                            # 更新止损管理器的持仓信息
-                            risk_controller.update_position_for_stop_loss(
-                                symbol=config["symbol"],
-                                side=side,
-                                amount=abs(delta_amt),
-                                entry_price=abs(entry_price),
-                                current_price=mid_price
-                            )
-                            logging.debug(
-                                f"📊 止损管理器已更新: symbol={config['symbol']}, side={side}, "
-                                f"amount={abs(delta_amt):.4f}, entry={abs(entry_price):.4f}, current={mid_price:.4f}"
-                            )
-                    except Exception as e:
-                        logging.warning(f"更新止损信息失败: {e}")
-
-                # ✅ 止损检查：异步检查是否触发止损
-                if risk_controller.stop_loss_manager and risk_controller.is_stop_loss_active():
-                    try:
-                        # 创建新的事件循环来运行异步止损检查
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        stop_loss_result = loop.run_until_complete(
-                            risk_controller.check_stop_loss(config["symbol"])
-                        )
-                        loop.close()
-
-                        if stop_loss_result and stop_loss_result.triggered:
-                            logging.error("=" * 70)
-                            logging.error(f"🚨 止损触发: {stop_loss_result.reason}")
-                            logging.error(f"亏损率: {stop_loss_result.loss_rate:.2%}")
-                            logging.error(f"需要平仓数量: {stop_loss_result.position_to_close:.4f}")
-                            logging.error(f"止损动作: {stop_loss_result.action.value}")
-                            logging.error("=" * 70)
-
-                            # 📊 记录止损触发指标
-                            if metrics_collector:
-                                metrics_collector.record_stop_loss(
-                                    strategy_name,
-                                    stop_loss_result.reason,
-                                    stop_loss_result.loss_rate
-                                )
-
-                            # 执行止损操作：撤销所有订单
-                            logging.warning("执行止损: 撤销所有挂单")
-                            market_maker.order_manager.cancel_all_open_orders(config["symbol"])
-
-                            # 暂停交易一段时间（冷却期）
-                            cooldown_time = risk_controller.stop_loss_manager.cooldown_minutes * 60
-                            logging.warning(f"进入冷却期 {cooldown_time/60:.0f} 分钟，暂停交易")
-                            time.sleep(10)  # 短暂暂停，让撤单生效
-                            continue  # 跳过本轮交易
-
-                    except Exception as e:
-                        logging.error(f"止损检查失败: {e}")
+                # 止损功能已禁用 - 如需启用请参考 git history
 
                 # ✅ 风险等级检查：根据风险等级决定是否继续交易
                 if not market_maker.order_manager.risk_actions(risk_controller.risk_level, symbol=config["symbol"]):
@@ -343,7 +223,7 @@ def get_parser():
         help="Prefix for the symbol (e.g., 'stg5s').",
     )
     parser.add_argument(
-        "--env", type=str, default="prod", choices=["qa", "prod"], help="Environment."
+        "--env", type=str, default="prod", choices=["qa", "uat", "prod"], help="Environment."
     )
     parser.add_argument(
         "--client-order-id", type=str, default="1655", help="Client order ID."
@@ -567,16 +447,16 @@ def main():
     if args.strategy:
         config["strategy_name"] = args.strategy
 
-    if config["env"] == "qa":
-        # QA 环境从 .env 文件读取 API 密钥
+    if config["env"] in ("qa", "uat"):
+        # QA/UAT 环境从 .env 文件读取 API 密钥
         import os
         from pathlib import Path
         from dotenv import load_dotenv
-        
+
         # 显式查找 .env 文件
         cwd = Path.cwd()
         env_file = cwd / ".env"
-        
+
         if env_file.exists():
             load_dotenv(env_file)
             logging.info(f"✅ 已加载 .env 文件: {env_file}")
@@ -584,13 +464,14 @@ def main():
             # 尝试从当前目录向上查找
             load_dotenv()  # 使用默认查找
             logging.warning(f"⚠️ 当前目录 {cwd} 未找到 .env 文件，使用默认查找")
-        
+
         access_key = os.getenv("access_key")
         secret_key = os.getenv("secret_key")
-        
+
+        env_name = config["env"].upper()
         if not access_key or not secret_key:
             logging.error("=" * 70)
-            logging.error("🚨 错误: 未能从 .env 文件读取 API 密钥!")
+            logging.error(f"🚨 错误: 未能从 .env 文件读取 API 密钥!")
             logging.error(f"   当前工作目录: {cwd}")
             logging.error(f"   .env 文件路径: {env_file}")
             logging.error(f"   .env 文件存在: {env_file.exists()}")
@@ -599,14 +480,20 @@ def main():
             logging.error("   access_key=your_access_key")
             logging.error("   secret_key=your_secret_key")
             logging.error("=" * 70)
-            raise RuntimeError("QA 环境需要 .env 文件中的 API 密钥")
-        
+            raise RuntimeError(f"{env_name} 环境需要 .env 文件中的 API 密钥")
+
+        # 根据环境选择 API 主机
+        if config["env"] == "qa":
+            api_host = "https://sapi.xt-qa2.com"  # XT QA2 测试环境
+        else:  # uat
+            api_host = "https://sapi.xt-uat.com"  # XT UAT 测试环境
+
         spot = Spot(
-            host="https://sapi.xt-qa2.com",  # XT QA2 测试环境
+            host=api_host,
             access_key=access_key,
             secret_key=secret_key,
         )
-        logging.info(f"✅ QA 环境 API 密钥已加载 (access_key: {access_key[:4]}...)")
+        logging.info(f"✅ {env_name} 环境 API 密钥已加载 (access_key: {access_key[:4]}..., host: {api_host})")
 
     elif config["env"] == "prod":
         # 使用安全的 API 密钥加载器 - 生产环境强制使用加密密钥
@@ -760,8 +647,10 @@ def main():
         # 根据环境选择 WebSocket URL
         if config["env"] == "qa":
             ws_url = "wss://stream.xt-qa2.com/public"  # QA2 测试环境
+        elif config["env"] == "uat":
+            ws_url = "wss://stream.xt-uat.com/public"  # UAT 测试环境
         else:
-            ws_url = "wss://stream.xt.com/public"     # 生产环境
+            ws_url = "wss://stream.xt.com/public"      # 生产环境
 
         # XT public WebSocket 不需要认证，直接连接
         ws_client = XTWebSocketClient(
@@ -938,11 +827,23 @@ def main():
     if args.strategy and "currencies" in config:
         info = order_manager.client.balances(config["currencies"])
         logging.info(info)
-        last_amount = [
+        
+        # 安全地获取余额，处理空资产列表的情况
+        target_currency = config["symbol"].split("_")[1].lower()
+        matching_amounts = [
             float(currency["totalAmount"])
-            for currency in info["assets"]
-            if currency["currency"] == config["symbol"].split("_")[1].lower()
-        ][0]
+            for currency in info.get("assets", [])
+            if currency.get("currency") == target_currency
+        ]
+        
+        if matching_amounts:
+            last_amount = matching_amounts[0]
+        else:
+            logging.warning(
+                f"未找到货币 {target_currency} 的余额，assets: {info.get('assets', [])}，使用默认值 0"
+            )
+            last_amount = 0.0
+        
         order_manager.init_amount = last_amount
         order_manager.last_amount = last_amount
         print(
