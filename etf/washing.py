@@ -455,6 +455,360 @@ class MinuteKlineManager:
         return stats
 
 
+class MarketActivityPhase(Enum):
+    """市场活跃度阶段"""
+    QUIET = "quiet"           # 冷淡期：成交量 × 0.2-0.5
+    NORMAL = "normal"         # 正常期：成交量 × 0.8-1.2
+    ACTIVE = "active"         # 活跃期：成交量 × 1.5-3.0
+    SURGE = "surge"           # 爆发期：成交量 × 3.0-8.0
+
+
+@dataclass
+class VolumeTarget:
+    """分钟成交量目标
+    
+    Attributes:
+        minute_ts: 分钟时间戳
+        base_volume: 基于波动率的基础成交量(USDT)
+        target_volume: 最终目标成交量(USDT)
+        phase: 当前活跃度阶段
+        volatility: 当时的波动率
+        executed_volume: 已执行成交量
+        trade_count: 已执行交易次数
+    """
+    minute_ts: int
+    base_volume: float
+    target_volume: float
+    phase: MarketActivityPhase
+    volatility: float
+    executed_volume: float = 0.0
+    trade_count: int = 0
+
+
+class VolumeTargetManager:
+    """
+    波动率驱动的成交量目标管理器
+    
+    核心思想：
+    1. 基于现货波动率计算基础成交量（波动越大，成交越多）
+    2. 引入活跃度周期，模拟市场的活跃/冷淡交替
+    3. 叠加幂律分布随机因子，产生自然的长尾分布
+    4. 多分钟趋势延续，高/低成交量有一定持续性
+    
+    成交量计算公式：
+    target_volume = base_volume(volatility) × phase_factor × power_law_random × trend_factor
+    
+    参数说明：
+    - base_volume: 波动率映射的基础量，volatility越高base越大
+    - phase_factor: 活跃度阶段因子 (0.2 ~ 8.0)
+    - power_law_random: 幂律分布随机数，产生长尾效应
+    - trend_factor: 趋势延续因子，前一分钟量大则当前也偏大
+    """
+    
+    # 波动率到基础成交量的映射（USDT）
+    # volatility是1分钟收益率的标准差
+    VOLATILITY_VOLUME_MAP = {
+        # (min_vol, max_vol): (min_base, max_base)
+        (0.0, 0.001): (50, 200),        # 极低波动 <0.1%: 50-200 USDT
+        (0.001, 0.003): (200, 500),     # 低波动 0.1%-0.3%: 200-500 USDT
+        (0.003, 0.006): (500, 1500),    # 中等波动 0.3%-0.6%: 500-1500 USDT
+        (0.006, 0.01): (1500, 4000),    # 较高波动 0.6%-1%: 1500-4000 USDT
+        (0.01, 0.02): (4000, 10000),    # 高波动 1%-2%: 4000-10000 USDT
+        (0.02, 1.0): (10000, 30000),    # 极高波动 >2%: 10000-30000 USDT
+    }
+    
+    # 活跃度阶段配置
+    PHASE_CONFIG = {
+        MarketActivityPhase.QUIET: {
+            "probability": 0.15,         # 15%概率进入冷淡期
+            "factor_range": (0.2, 0.5),  # 成交量缩小到20%-50%
+            "duration_range": (2, 8),    # 持续2-8分钟
+        },
+        MarketActivityPhase.NORMAL: {
+            "probability": 0.60,         # 60%概率正常
+            "factor_range": (0.8, 1.2),  # 正常波动80%-120%
+            "duration_range": (3, 15),   # 持续3-15分钟
+        },
+        MarketActivityPhase.ACTIVE: {
+            "probability": 0.20,         # 20%概率活跃
+            "factor_range": (1.5, 3.0),  # 放大1.5-3倍
+            "duration_range": (2, 10),   # 持续2-10分钟
+        },
+        MarketActivityPhase.SURGE: {
+            "probability": 0.05,         # 5%概率爆发
+            "factor_range": (3.0, 8.0),  # 放大3-8倍
+            "duration_range": (1, 3),    # 持续1-3分钟（短暂爆发）
+        },
+    }
+    
+    def __init__(
+        self,
+        symbol: str,
+        min_volume: float = 30.0,       # 最小成交量(USDT)
+        max_volume: float = 50000.0,    # 最大成交量(USDT)
+        trend_momentum: float = 0.3,    # 趋势延续强度 (0-1)
+    ):
+        """
+        初始化成交量目标管理器
+        
+        Args:
+            symbol: 交易对
+            min_volume: 最小分钟成交量(USDT)
+            max_volume: 最大分钟成交量(USDT)
+            trend_momentum: 趋势延续强度，越大则成交量趋势越持续
+        """
+        self.symbol = symbol
+        self.min_volume = min_volume
+        self.max_volume = max_volume
+        self.trend_momentum = trend_momentum
+        
+        # 当前状态
+        self.current_target: Optional[VolumeTarget] = None
+        self.current_phase = MarketActivityPhase.NORMAL
+        self.phase_remaining_minutes = 5
+        self.phase_factor = 1.0
+        
+        # 历史记录（用于趋势延续）
+        self.volume_history: List[float] = []
+        self.volatility_history: List[float] = []
+        self.max_history = 60  # 保留60分钟历史
+        
+        # 统计信息
+        self.total_target_volume = 0.0
+        self.total_executed_volume = 0.0
+        self.minute_count = 0
+        
+        logging.info(
+            f"📊 [VolumeTargetManager] 初始化完成: symbol={symbol}, "
+            f"min={min_volume}, max={max_volume}, momentum={trend_momentum}"
+        )
+    
+    def _get_base_volume_from_volatility(self, volatility: float) -> float:
+        """
+        根据波动率计算基础成交量
+        
+        Args:
+            volatility: 1分钟收益率的标准差
+            
+        Returns:
+            基础成交量(USDT)
+        """
+        for (min_vol, max_vol), (min_base, max_base) in self.VOLATILITY_VOLUME_MAP.items():
+            if min_vol <= volatility < max_vol:
+                # 在区间内线性插值
+                ratio = (volatility - min_vol) / (max_vol - min_vol) if max_vol > min_vol else 0.5
+                return min_base + (max_base - min_base) * ratio
+        
+        # 超出范围，返回最大值
+        return 30000.0
+    
+    def _update_phase(self) -> None:
+        """更新活跃度阶段"""
+        self.phase_remaining_minutes -= 1
+        
+        if self.phase_remaining_minutes <= 0:
+            # 切换到新阶段
+            old_phase = self.current_phase
+            
+            # 根据概率选择新阶段
+            rand = random.random()
+            cumulative = 0.0
+            for phase, config in self.PHASE_CONFIG.items():
+                cumulative += config["probability"]
+                if rand < cumulative:
+                    self.current_phase = phase
+                    break
+            
+            # 设置新阶段持续时间
+            duration_range = self.PHASE_CONFIG[self.current_phase]["duration_range"]
+            self.phase_remaining_minutes = random.randint(*duration_range)
+            
+            # 设置阶段因子（在范围内随机）
+            factor_range = self.PHASE_CONFIG[self.current_phase]["factor_range"]
+            self.phase_factor = random.uniform(*factor_range)
+            
+            if old_phase != self.current_phase:
+                logging.info(
+                    f"🔄 [活跃度切换] {old_phase.value} → {self.current_phase.value}, "
+                    f"因子={self.phase_factor:.2f}, 持续={self.phase_remaining_minutes}分钟"
+                )
+    
+    def _get_trend_factor(self) -> float:
+        """
+        计算趋势延续因子
+        
+        基于前几分钟的成交量，如果前面成交量大，当前也倾向于大
+        """
+        if len(self.volume_history) < 2:
+            return 1.0
+        
+        # 计算最近3分钟的平均成交量
+        recent_avg = np.mean(self.volume_history[-3:]) if len(self.volume_history) >= 3 else self.volume_history[-1]
+        
+        # 计算全局平均
+        global_avg = np.mean(self.volume_history) if self.volume_history else recent_avg
+        
+        if global_avg <= 0:
+            return 1.0
+        
+        # 趋势因子 = 1 + momentum * (recent/global - 1)
+        ratio = recent_avg / global_avg
+        trend_factor = 1.0 + self.trend_momentum * (ratio - 1.0)
+        
+        # 限制范围避免极端值
+        return np.clip(trend_factor, 0.5, 2.0)
+    
+    def calculate_minute_target(self, volatility: float) -> VolumeTarget:
+        """
+        计算当前分钟的成交量目标
+        
+        Args:
+            volatility: 当前1分钟波动率（收益率标准差）
+            
+        Returns:
+            VolumeTarget: 本分钟的成交量目标
+        """
+        minute_ts = int(time.time()) // 60 * 60
+        
+        # 1. 更新活跃度阶段
+        self._update_phase()
+        
+        # 2. 基于波动率的基础成交量
+        base_volume = self._get_base_volume_from_volatility(volatility)
+        
+        # 3. 活跃度阶段因子
+        phase_multiplier = self.phase_factor
+        
+        # 4. 幂律分布随机因子（产生长尾）
+        # Pareto分布，α=1.5 产生较明显的长尾
+        power_law_factor = np.random.pareto(1.5) + 1
+        power_law_factor = min(power_law_factor, 5.0)  # 限制最大5倍
+        
+        # 5. 趋势延续因子
+        trend_factor = self._get_trend_factor()
+        
+        # 6. 最终计算
+        target_volume = base_volume * phase_multiplier * power_law_factor * trend_factor
+        
+        # 7. 限制范围
+        target_volume = np.clip(target_volume, self.min_volume, self.max_volume)
+        
+        # 8. 记录历史
+        self.volume_history.append(target_volume)
+        self.volatility_history.append(volatility)
+        if len(self.volume_history) > self.max_history:
+            self.volume_history.pop(0)
+            self.volatility_history.pop(0)
+        
+        # 9. 创建目标对象
+        self.current_target = VolumeTarget(
+            minute_ts=minute_ts,
+            base_volume=base_volume,
+            target_volume=target_volume,
+            phase=self.current_phase,
+            volatility=volatility,
+        )
+        
+        # 10. 更新统计
+        self.total_target_volume += target_volume
+        self.minute_count += 1
+        
+        logging.info(
+            f"📈 [成交量目标] minute={minute_ts}, volatility={volatility:.4f}, "
+            f"base={base_volume:.0f}, phase={self.current_phase.value}({phase_multiplier:.2f}), "
+            f"power_law={power_law_factor:.2f}, trend={trend_factor:.2f}, "
+            f"target={target_volume:.0f} USDT"
+        )
+        
+        return self.current_target
+    
+    def record_execution(self, volume: float) -> None:
+        """
+        记录成交执行
+        
+        Args:
+            volume: 成交量(USDT)
+        """
+        if self.current_target:
+            self.current_target.executed_volume += volume
+            self.current_target.trade_count += 1
+            self.total_executed_volume += volume
+    
+    def get_remaining_volume(self) -> float:
+        """获取当前分钟剩余需要成交的量"""
+        if not self.current_target:
+            return 0.0
+        return max(0, self.current_target.target_volume - self.current_target.executed_volume)
+    
+    def get_recommended_trade_count(self) -> int:
+        """
+        获取推荐的本分钟交易次数
+        
+        基于目标成交量和单笔平均大小计算
+        """
+        if not self.current_target:
+            return 4  # 默认4次
+        
+        # 假设单笔平均 50-200 USDT
+        avg_trade_size = random.uniform(50, 200)
+        
+        # 计算需要的交易次数
+        recommended = int(self.current_target.target_volume / avg_trade_size)
+        
+        # 限制范围 1-30次/分钟
+        return max(1, min(30, recommended))
+    
+    def get_recommended_interval(self) -> float:
+        """
+        获取推荐的交易间隔（秒）
+        
+        根据目标成交量动态调整
+        """
+        trade_count = self.get_recommended_trade_count()
+        
+        # 60秒/交易次数 = 间隔
+        base_interval = 60.0 / trade_count
+        
+        # 添加随机抖动 ±30%
+        jitter = base_interval * random.uniform(-0.3, 0.3)
+        
+        interval = base_interval + jitter
+        
+        # 限制范围 2-30秒
+        return max(2.0, min(30.0, interval))
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """获取统计信息"""
+        stats = {
+            "symbol": self.symbol,
+            "minute_count": self.minute_count,
+            "total_target_volume": self.total_target_volume,
+            "total_executed_volume": self.total_executed_volume,
+            "execution_rate": self.total_executed_volume / self.total_target_volume if self.total_target_volume > 0 else 0,
+            "current_phase": self.current_phase.value,
+            "phase_remaining": self.phase_remaining_minutes,
+            "phase_factor": self.phase_factor,
+        }
+        
+        if self.current_target:
+            stats.update({
+                "current_target_volume": self.current_target.target_volume,
+                "current_executed_volume": self.current_target.executed_volume,
+                "current_remaining": self.get_remaining_volume(),
+                "current_volatility": self.current_target.volatility,
+            })
+        
+        if self.volume_history:
+            stats.update({
+                "avg_volume_1h": np.mean(self.volume_history),
+                "max_volume_1h": max(self.volume_history),
+                "min_volume_1h": min(self.volume_history),
+                "std_volume_1h": np.std(self.volume_history),
+            })
+        
+        return stats
+
+
 class WashOrderTracker:
     """
     洗盘订单追踪器
@@ -775,16 +1129,18 @@ class WashController:
         r (redis.Redis): Redis连接实例
     """
     
-    def __init__(self, order_manager: Any, market_maker: Any) -> None:
+    def __init__(self, order_manager: Any, market_maker: Any, symbol_config_manager: Any = None) -> None:
         """
         初始化洗盘交易控制器
         
         Args:
             order_manager: 订单管理器实例，用于执行交易
             market_maker: 做市商实例，用于获取价格信息
+            symbol_config_manager: Symbol配置管理器，用于动态获取交易对精度
         """
         self.order_manager = order_manager
         self.market_maker = market_maker
+        self.symbol_config_manager = symbol_config_manager
         self.returns: List[float] = []
 
         self.max_trade_amount: int = DEFAULT_MAX_TRADE_AMOUNT
@@ -810,6 +1166,15 @@ class WashController:
         
         # ✅ v3: K线连续性管理器 - 解决跳空和不连续问题
         self.kline_manager: Optional[MinuteKlineManager] = None
+        
+        # ✅ v4: 波动率驱动的成交量目标管理器
+        self.volume_target_manager: Optional[VolumeTargetManager] = None
+        
+        # ✅ v4: 波动率计算缓存
+        self._price_cache: List[float] = []  # 最近价格缓存
+        self._price_cache_max_size: int = 120  # 保留120个价格点（约2分钟，按秒计算）
+        self._last_volatility: float = 0.003  # 默认波动率 0.3%
+        self._last_volatility_update: float = 0.0  # 上次更新时间
     
     def init_order_tracker(
         self, 
@@ -992,6 +1357,68 @@ class WashController:
             )
 
         self.trend_duration += 1
+
+    def update_price_cache(self, price: float) -> None:
+        """
+        更新价格缓存（用于计算波动率）
+        
+        Args:
+            price: 最新价格
+        """
+        self._price_cache.append(price)
+        if len(self._price_cache) > self._price_cache_max_size:
+            self._price_cache.pop(0)
+    
+    def calculate_volatility(self) -> float:
+        """
+        计算当前波动率（1分钟收益率的标准差）
+        
+        Returns:
+            float: 波动率（标准差）
+        """
+        # 需要至少10个价格点才能计算有意义的波动率
+        if len(self._price_cache) < 10:
+            return self._last_volatility
+        
+        # 计算收益率
+        prices = np.array(self._price_cache)
+        returns = np.diff(prices) / prices[:-1]
+        
+        # 过滤异常值（超过5%的单次变化视为异常）
+        returns = returns[np.abs(returns) < 0.05]
+        
+        if len(returns) < 5:
+            return self._last_volatility
+        
+        # 计算标准差
+        volatility = np.std(returns)
+        
+        # 平滑处理：与上次波动率做加权平均，避免突变
+        smoothed_volatility = 0.7 * volatility + 0.3 * self._last_volatility
+        
+        self._last_volatility = smoothed_volatility
+        self._last_volatility_update = time.time()
+        
+        return smoothed_volatility
+    
+    def get_spot_volatility_from_binance(self, symbol: str) -> float:
+        """
+        从Binance获取现货波动率
+        
+        优先使用本地缓存的波动率，避免频繁API调用
+        
+        Args:
+            symbol: 现货交易对（如 TONUSDT）
+            
+        Returns:
+            float: 波动率
+        """
+        # 如果本地价格缓存足够，直接使用本地计算
+        if len(self._price_cache) >= 30:
+            return self.calculate_volatility()
+        
+        # 否则使用默认值
+        return self._last_volatility
 
     def generate_continuous_price(
         self,
@@ -1524,7 +1951,17 @@ class WashController:
 
         # washing price with respect to best_sell or mid_price
         wash_method = config.get("wash", "mid_price")  # 默认使用 mid_price
-        precision = config.get("precision", 6)  # 默认精度
+        
+        # 从 symbol_config_manager 获取动态精度
+        symbol = config.get("symbol")
+        precision = None
+        if self.symbol_config_manager and symbol:
+            precision = self.symbol_config_manager.get_price_precision(symbol)
+        
+        if precision is None:
+            raise RuntimeError(
+                f"无法获取 {symbol} 的价格精度配置！请检查 symbol_config_manager 是否正确初始化"
+            )
 
         if wash_method == "best_sell":
             washing_price = float(best_sell) - float(
@@ -1693,23 +2130,36 @@ class WashController:
         # 初始化
         last_mid_price = self.get_washing_price(config)
 
-        # ✅ 从配置读取基准间隔（默认15秒 → 1分钟4次）
-        avg_interval = config.get("washing_lambda", 15)
+        # ✅ v4: 初始化波动率驱动的成交量目标管理器
+        enable_volume_target = config.get("enable_volume_target", True)
+        if enable_volume_target:
+            self.volume_target_manager = VolumeTargetManager(
+                symbol=config.get("symbol", "UNKNOWN"),
+                min_volume=config.get("min_wash_volume", 30.0),
+                max_volume=config.get("max_wash_volume", 50000.0),
+                trend_momentum=config.get("volume_trend_momentum", 0.3),
+            )
+            logging.info("✅ 波动率驱动成交量目标管理器已启用")
+        else:
+            self.volume_target_manager = None
+            logging.info("ℹ️ 波动率驱动成交量目标管理器已禁用，使用固定间隔模式")
 
-        # ✅ 添加随机抖动范围（±20%，避免机械感）
-        jitter_range = avg_interval * 0.2
+        # ✅ 从配置读取基准间隔（默认15秒 → 1分钟4次，作为fallback）
+        base_interval = config.get("washing_lambda", 15)
 
         logging.info("")
         logging.info("=" * 70)
         logging.info("⚙️  洗盘交易参数配置")
         logging.info("=" * 70)
-        logging.info(f"基准间隔: {avg_interval}秒")
-        logging.info(f"抖动范围: ±{jitter_range:.1f}秒 (±{jitter_range/avg_interval*100:.0f}%)")
-        logging.info(f"预计洗盘频率: {60/avg_interval:.1f} 次/分钟")
+        logging.info(f"成交量目标模式: {'波动率驱动' if enable_volume_target else '固定间隔'}")
+        logging.info(f"基准间隔(fallback): {base_interval}秒")
         logging.info(f"每次小单数: {config.get('micro_trades_count', 4)}笔")
-        logging.info(f"预计成交频率: {(60/avg_interval)*config.get('micro_trades_count', 4):.1f} 笔/分钟")
         logging.info(f"交易对: {config.get('symbol', 'UNKNOWN')}")
         logging.info(f"初始净值: {last_mid_price:.6f}")
+        if enable_volume_target:
+            logging.info(f"最小成交量: {config.get('min_wash_volume', 30.0)} USDT")
+            logging.info(f"最大成交量: {config.get('max_wash_volume', 50000.0)} USDT")
+            logging.info(f"趋势延续强度: {config.get('volume_trend_momentum', 0.3)}")
         logging.info("=" * 70)
         logging.info("")
 
@@ -1717,16 +2167,56 @@ class WashController:
         loop_count = 0
         total_washes = 0
         total_sleep_time = 0
+        total_volume_executed = 0.0
+        
+        # 分钟追踪
+        current_minute = int(time.time()) // 60
+        minute_trade_count = 0
 
         while self._running:  # ✅ 检查运行标志
             loop_count += 1
             
-            # ✅ 固定间隔 + 随机抖动
-            sleep_time = avg_interval + random.uniform(-jitter_range, jitter_range)
+            # ✅ v4: 检查是否进入新的分钟
+            now_minute = int(time.time()) // 60
+            if now_minute != current_minute:
+                # 新的一分钟开始
+                if self.volume_target_manager and current_minute > 0:
+                    # 记录上一分钟的统计
+                    logging.info(
+                        f"📊 [分钟统计] 上一分钟交易{minute_trade_count}次, "
+                        f"目标完成率: {self.volume_target_manager.current_target.executed_volume / self.volume_target_manager.current_target.target_volume * 100:.1f}%" 
+                        if self.volume_target_manager.current_target else f"交易{minute_trade_count}次"
+                    )
+                current_minute = now_minute
+                minute_trade_count = 0
+                
+                # 计算新的分钟成交量目标
+                if self.volume_target_manager:
+                    volatility = self.calculate_volatility()
+                    self.volume_target_manager.calculate_minute_target(volatility)
+            
+            # ✅ v4: 计算本次交易间隔
+            if self.volume_target_manager:
+                # 使用波动率驱动的动态间隔
+                sleep_time = self.volume_target_manager.get_recommended_interval()
+            else:
+                # 使用固定间隔 + 随机抖动
+                jitter_range = base_interval * 0.2
+                sleep_time = base_interval + random.uniform(-jitter_range, jitter_range)
             
             logging.info("-" * 70)
             logging.info(f"🔄 洗盘循环 #{loop_count}")
-            logging.info(f"   等待时间: {sleep_time:.2f}秒 (基准{avg_interval}秒 + 抖动{sleep_time-avg_interval:+.2f}秒)")
+            if self.volume_target_manager and self.volume_target_manager.current_target:
+                target = self.volume_target_manager.current_target
+                remaining = self.volume_target_manager.get_remaining_volume()
+                logging.info(
+                    f"   成交量目标: {target.target_volume:.0f} USDT, "
+                    f"已执行: {target.executed_volume:.0f}, 剩余: {remaining:.0f}"
+                )
+                logging.info(
+                    f"   活跃度: {target.phase.value}, 波动率: {target.volatility:.4f}"
+                )
+            logging.info(f"   等待时间: {sleep_time:.2f}秒")
             logging.info(f"   累计执行: {total_washes}次洗盘")
             
             time.sleep(sleep_time)
@@ -1742,6 +2232,10 @@ class WashController:
             try:
                 mid_price = self.get_washing_price(config)
                 logging.info(f"   当前净值: {mid_price:.6f}")
+                
+                # ✅ v4: 更新价格缓存用于波动率计算
+                self.update_price_cache(mid_price)
+                
             except Exception as e:
                 logging.error(f"   ❌ 获取净值失败: {e}")
                 logging.error(f"   跳过本次洗盘")
@@ -1754,16 +2248,47 @@ class WashController:
 
             # 执行洗盘交易
             try:
+                # ✅ v4: 计算本次洗盘的目标成交量
+                if self.volume_target_manager and self.volume_target_manager.current_target:
+                    remaining = self.volume_target_manager.get_remaining_volume()
+                    # 根据剩余目标和剩余时间计算单次量
+                    seconds_left = 60 - (int(time.time()) % 60)
+                    estimated_trades = max(1, seconds_left / max(2, sleep_time))
+                    single_trade_target = remaining / estimated_trades if estimated_trades > 0 else remaining
+                    # 限制单次成交量范围
+                    single_trade_target = max(30, min(500, single_trade_target))
+                else:
+                    single_trade_target = None
+                
+                # 获取动态精度
+                symbol = config["symbol"]
+                prec = self.symbol_config_manager.get_price_precision(symbol) if self.symbol_config_manager else None
+                prec_amount = self.symbol_config_manager.get_quantity_precision(symbol) if self.symbol_config_manager else None
+                
+                if prec is None or prec_amount is None:
+                    raise RuntimeError(
+                        f"无法获取 {symbol} 的精度配置！请检查 symbol_config_manager 是否正确初始化"
+                    )
+                
                 last_mid_price = self.wash(
-                    symbol=config["symbol"],
+                    symbol=symbol,
                     last_mid_price=last_mid_price,
                     mid_price=mid_price,
                     config=config,
-                    prec=config["precision"],
-                    prec_amount=config["prec_amount"],
+                    prec=prec,
+                    prec_amount=prec_amount,
                 )
                 total_washes += 1
-                logging.info(f"   ✅ 洗盘完成 (第{total_washes}次)")
+                minute_trade_count += 1
+                
+                # ✅ v4: 记录成交量（估算值）
+                # 实际成交量需要从wash方法返回，这里用估算
+                estimated_volume = single_trade_target if single_trade_target else 100.0
+                if self.volume_target_manager:
+                    self.volume_target_manager.record_execution(estimated_volume)
+                total_volume_executed += estimated_volume
+                
+                logging.info(f"   ✅ 洗盘完成 (第{total_washes}次, 本分钟第{minute_trade_count}次)")
                 
                 # ✅ 检查孤儿订单（每次洗盘后检查）
                 orphan_result = self.check_orphan_orders()
@@ -1785,8 +2310,14 @@ class WashController:
                     logging.info(f"洗盘次数: {total_washes}")
                     logging.info(f"平均间隔: {avg_sleep:.2f}秒")
                     logging.info(f"实际频率: {actual_freq:.1f} 次/分钟")
-                    logging.info(f"目标频率: {60/avg_interval:.1f} 次/分钟")
-                    logging.info(f"达成率: {(actual_freq/(60/avg_interval))*100:.1f}%")
+                    logging.info(f"累计成交量: {total_volume_executed:.0f} USDT")
+                    if self.volume_target_manager:
+                        vol_stats = self.volume_target_manager.get_stats()
+                        logging.info(f"活跃度阶段: {vol_stats.get('current_phase', 'unknown')}")
+                        logging.info(f"成交量目标完成率: {vol_stats.get('execution_rate', 0)*100:.1f}%")
+                        if 'avg_volume_1h' in vol_stats:
+                            logging.info(f"1小时平均目标: {vol_stats['avg_volume_1h']:.0f} USDT/分钟")
+                            logging.info(f"1小时成交波动: {vol_stats.get('std_volume_1h', 0):.0f} USDT (标准差)")
                     logging.info("=" * 70)
                     logging.info("")
                     
