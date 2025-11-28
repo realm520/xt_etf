@@ -5,10 +5,10 @@ module.exports = {
       name: 'etf-stg3l',
       script: 'python',
       args: 'run_etf.py --strategy stg3l',
-      cwd: '/Users/harry/code/xt_etf',
+      cwd: '/Users/harry/code/quants/xt_etf',
       interpreter: 'none',
       env: {
-        PYTHONPATH: '/Users/harry/code/xt_etf',
+        PYTHONPATH: '/Users/harry/code/quants/xt_etf',
         STRATEGY: 'stg3l'
       },
       instances: 1,
@@ -29,10 +29,10 @@ module.exports = {
       name: 'etf-stg3s',
       script: 'python',
       args: 'run_etf.py --strategy stg3s',
-      cwd: '/Users/harry/code/xt_etf',
+      cwd: '/Users/harry/code/quants/xt_etf',
       interpreter: 'none',
       env: {
-        PYTHONPATH: '/Users/harry/code/xt_etf',
+        PYTHONPATH: '/Users/harry/code/quants/xt_etf',
         STRATEGY: 'stg3s'
       },
       instances: 1,
@@ -53,10 +53,10 @@ module.exports = {
       name: 'etf-stg5l',
       script: 'python',
       args: 'run_etf.py --strategy stg5l',
-      cwd: '/Users/harry/code/xt_etf',
+      cwd: '/Users/harry/code/quants/xt_etf',
       interpreter: 'none',
       env: {
-        PYTHONPATH: '/Users/harry/code/xt_etf',
+        PYTHONPATH: '/Users/harry/code/quants/xt_etf',
         STRATEGY: 'stg5l'
       },
       instances: 1,
@@ -77,10 +77,10 @@ module.exports = {
       name: 'etf-stg5s',
       script: 'python',
       args: 'run_etf.py --strategy stg5s',
-      cwd: '/Users/harry/code/xt_etf',
+      cwd: '/Users/harry/code/quants/xt_etf',
       interpreter: 'none',
       env: {
-        PYTHONPATH: '/Users/harry/code/xt_etf',
+        PYTHONPATH: '/Users/harry/code/quants/xt_etf',
         STRATEGY: 'stg5s'
       },
       instances: 1,
@@ -101,10 +101,10 @@ module.exports = {
       name: 'etf-ton3l',
       script: 'python',
       args: 'run_etf.py --strategy ton3l --env qa',
-      cwd: '/Users/harry/code/xt_etf',
+      cwd: '/Users/harry/code/quants/xt_etf',
       interpreter: 'none',
       env: {
-        PYTHONPATH: '/Users/harry/code/xt_etf',
+        PYTHONPATH: '/Users/harry/code/quants/xt_etf',
         STRATEGY: 'ton3l',
         ENV: 'qa'
       },
@@ -126,10 +126,10 @@ module.exports = {
       name: 'etf-ton3s',
       script: 'python',
       args: 'run_etf.py --strategy ton3s --env qa',
-      cwd: '/Users/harry/code/xt_etf',
+      cwd: '/Users/harry/code/quants/xt_etf',
       interpreter: 'none',
       env: {
-        PYTHONPATH: '/Users/harry/code/xt_etf',
+        PYTHONPATH: '/Users/harry/code/quants/xt_etf',
         STRATEGY: 'ton3s',
         ENV: 'qa'
       },
@@ -151,10 +151,10 @@ module.exports = {
       name: 'etf-net-value',
       script: 'python',
       args: 'run_net_value.py',
-      cwd: '/Users/harry/code/xt_etf',
+      cwd: '/Users/harry/code/quants/xt_etf',
       interpreter: 'none',
       env: {
-        PYTHONPATH: '/Users/harry/code/xt_etf'
+        PYTHONPATH: '/Users/harry/code/quants/xt_etf'
       },
       instances: 1,
       autorestart: true,

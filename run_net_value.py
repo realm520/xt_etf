@@ -97,9 +97,11 @@ def main():
 
     args = parser.parse_args()
 
-    # 加载完整配置（包括数据库配置）
+    # 加载策略配置（合并全局默认 + 策略特定配置）
+    strategy_config = load_strategy_config(args.strategy)
+    
+    # 加载全局配置用于数据库等设置
     full_config = load_config()
-    strategy_config = full_config["strategies"][args.strategy]
 
     # 获取策略特定参数
     strategy_params = get_strategy_params(args.strategy)
