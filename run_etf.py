@@ -666,6 +666,7 @@ def main():
         ws_client = None
 
     # ===== 初始化 Symbol 配置管理器（用于动态获取精度配置） =====
+    # 🔴 关键：精度配置必须从交易所API获取，失败则退出程序
     symbol_config_manager = None
     try:
         symbol_config_manager = SymbolConfigManager(
@@ -681,12 +682,13 @@ def main():
             symbol_config_manager.start_auto_refresh()
             logging.info("✅ Symbol配置自动刷新已启动")
         else:
-            logging.warning(f"⚠️ 无法加载 {config['symbol']} 配置，将使用YAML配置")
-            symbol_config_manager = None
+            logging.critical(f"❌ 无法加载 {config['symbol']} 的精度配置！程序无法继续")
+            logging.critical("请检查: 1. 交易所API是否可访问  2. 交易对名称是否正确")
+            sys.exit(1)
     except Exception as e:
-        logging.error(f"❌ Symbol配置管理器初始化失败: {e}")
-        logging.warning("系统将使用YAML配置的精度参数")
-        symbol_config_manager = None
+        logging.critical(f"❌ Symbol配置管理器初始化失败: {e}")
+        logging.critical("精度配置是交易的关键参数，程序无法继续运行")
+        sys.exit(1)
 
     logging.info("run RiskController")
     risk_controller = RiskController(spot, risk_params, strategy_name=strategy_name, ws_client=ws_client)
@@ -843,8 +845,8 @@ def main():
             f"init market making {config['symbol']} amount {order_manager.last_amount}"
         )
     if order_manager.risk_actions(risk_controller.risk_level, symbol=config["symbol"]):
-        market_maker = MarketMaker(order_manager)
-        wash_controller = WashController(order_manager, market_maker)
+        market_maker = MarketMaker(order_manager, symbol_config_manager=symbol_config_manager)
+        wash_controller = WashController(order_manager, market_maker, symbol_config_manager=symbol_config_manager)
         
         # ✅ 初始化洗盘订单追踪器（检测和处理孤儿订单）
         wash_order_check_interval = config.get("wash_order_check_interval", 5.0)

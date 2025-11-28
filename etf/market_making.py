@@ -43,14 +43,16 @@ class MarketMaker:
         r (redis.Redis): Redis连接实例，用于数据缓存和通信
     """
     
-    def __init__(self, order_manager: Any) -> None:
+    def __init__(self, order_manager: Any, symbol_config_manager: Any = None) -> None:
         """
         初始化做市商
 
         Args:
             order_manager: 订单管理器实例，用于执行订单操作
+            symbol_config_manager: Symbol配置管理器，用于动态获取交易对精度
         """
         self.order_manager = order_manager
+        self.symbol_config_manager = symbol_config_manager
         self.best_sell: float = 0.0
         self.best_buy: float = 0.0
         self.r: redis.Redis = redis.Redis(
@@ -268,6 +270,24 @@ class MarketMaker:
         # 从配置读取参数
         orderbook_config_dict = config.get("orderbook_config", {})
 
+        # 获取动态精度配置
+        price_precision = None
+        quantity_precision = None
+        
+        if self.symbol_config_manager:
+            price_precision = self.symbol_config_manager.get_price_precision(symbol)
+            quantity_precision = self.symbol_config_manager.get_quantity_precision(symbol)
+        
+        if price_precision is None or quantity_precision is None:
+            raise RuntimeError(
+                f"无法获取 {symbol} 的精度配置！请检查：\n"
+                f"1. symbol_config_manager 是否正确初始化\n"
+                f"2. 交易所 API 是否可访问\n"
+                f"3. 交易对名称是否正确"
+            )
+        
+        logging.info(f"📐 使用动态精度: 价格={price_precision}, 数量={quantity_precision}")
+        
         # 创建订单簿配置（根据算法类型选择配置类）
         base_config_params = {
             "total_budget": orderbook_config_dict.get("total_budget", 10000.0),
@@ -275,8 +295,8 @@ class MarketMaker:
             "mid_price": netvalue,
             "bid_ask_spread": config["bid_ask_spread"],
             "symbol": symbol,
-            "price_precision": orderbook_config_dict.get("price_precision", config.get("precision", 6)),
-            "quantity_precision": orderbook_config_dict.get("quantity_precision", config.get("prec_amount", 2)),
+            "price_precision": price_precision,
+            "quantity_precision": quantity_precision,
         }
 
         if orderbook_algorithm == "layered":
@@ -375,8 +395,8 @@ class MarketMaker:
         anti_pin_config = {
             "anti_pin_rate": config["anti_pin_rate"],
             "anti_pin_usdt": config["anti_pin_usdt"],
-            "precision": config["precision"],
-            "prec_amount": config["prec_amount"],
+            "precision": price_precision,
+            "prec_amount": quantity_precision,
         }
 
         # === 7. 使用OrderExecutor执行订单簿更新 ===
