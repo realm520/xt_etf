@@ -206,8 +206,8 @@ def get_parser():
     parser.add_argument(
         "--strategy",
         type=str,
-        choices=available_strategies if available_strategies else None,
-        help=f"Use predefined strategy from config file. Available: {', '.join(available_strategies) if available_strategies else 'none'}",
+        choices=available_strategies,
+        help=f"Use predefined strategy from config file. Available: {', '.join(available_strategies)}",
     )
     parser.add_argument(
         "--config",
