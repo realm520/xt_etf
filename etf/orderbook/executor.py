@@ -164,6 +164,10 @@ class OrderExecutor:
         current_sell = sum(stats["SELL"] for stats in detailed_stats.values())
         current_total = current_buy + current_sell
         
+        # 🔄 再平衡机制（严重不平衡时自动修复）
+        rebalance_add = []
+        rebalance_cancel = []
+        
         if current_total > 0:
             imbalance = abs(current_buy - current_sell) / current_total
             if imbalance > 0.2:  # 不平衡度超过20%
@@ -178,6 +182,18 @@ class OrderExecutor:
                 self.logger.info(
                     f"📊 目标订单分布: BUY={target_buy}, SELL={target_sell}"
                 )
+                
+                # 🔄 触发再平衡（不平衡度>30%时）
+                if imbalance > 0.3:
+                    rebalance_add, rebalance_cancel = self.rebalance_orders(
+                        current_orders=current_orders,
+                        target_orders=target_orders,
+                        imbalance_threshold=0.3,
+                        target_ratio=0.5,
+                    )
+                    self.logger.info(
+                        f"🔄 再平衡计划: 添加 {len(rebalance_add)}, 取消 {len(rebalance_cancel)}"
+                    )
 
         # === 1. 订单匹配分析 ===
         optimized_add_orders, optimized_cancel_orders = self._match_orders(
@@ -220,6 +236,17 @@ class OrderExecutor:
                     f"净做市={effective_mm_count}, 可用={available_slots}, 需添加={len(optimized_add_orders)}"
                 )
 
+        # === 1.6 合并再平衡订单 ===
+        if rebalance_add:
+            self.logger.info(f"🔄 合并再平衡添加订单: {len(rebalance_add)}")
+            optimized_add_orders.extend(rebalance_add)
+        if rebalance_cancel:
+            # 避免重复取消
+            existing_cancel_ids = {o.get("orderId") for o in optimized_cancel_orders}
+            new_cancel = [o for o in rebalance_cancel if o.get("orderId") not in existing_cancel_ids]
+            self.logger.info(f"🔄 合并再平衡取消订单: {len(new_cancel)}")
+            optimized_cancel_orders.extend(new_cancel)
+
         # 为每个新订单设置clientOrderId和order_purpose
         for order_data in optimized_add_orders:
             # 根据订单类型设置带前缀的clientOrderId
@@ -235,6 +262,8 @@ class OrderExecutor:
                 order_data["clientOrderId"] = f"antipin_{base_id}"
             elif purpose == "wash_trading":
                 order_data["clientOrderId"] = f"wash_{base_id}"
+            elif purpose == "rebalance":
+                order_data["clientOrderId"] = f"rebal_{base_id}"
             else:
                 order_data["clientOrderId"] = base_id
 
@@ -365,6 +394,7 @@ class OrderExecutor:
             "anti_pin": 0,
             "wash_trading": 0,
             "hedging": 0,
+            "rebalance": 0,
             "unknown": 0,
         }
         
@@ -379,6 +409,8 @@ class OrderExecutor:
                 stats["wash_trading"] += 1
             elif client_order_id.startswith("hedge_"):
                 stats["hedging"] += 1
+            elif client_order_id.startswith("rebal_"):
+                stats["rebalance"] += 1
             else:
                 stats["unknown"] += 1
         
@@ -404,7 +436,7 @@ class OrderExecutor:
                 ...
             }
         """
-        order_types = ["market_making", "anti_pin", "wash_trading", "hedging", "unknown"]
+        order_types = ["market_making", "anti_pin", "wash_trading", "hedging", "rebalance", "unknown"]
         stats = {
             order_type: {"BUY": 0, "SELL": 0, "total": 0}
             for order_type in order_types
@@ -423,6 +455,8 @@ class OrderExecutor:
                 order_type = "wash_trading"
             elif client_order_id.startswith("hedge_"):
                 order_type = "hedging"
+            elif client_order_id.startswith("rebal_"):
+                order_type = "rebalance"
             else:
                 order_type = "unknown"
 
@@ -529,6 +563,7 @@ class OrderExecutor:
             "anti_pin": "反针对",
             "wash_trading": "洗盘",
             "hedging": "对冲",
+            "rebalance": "再平衡",
             "unknown": "未知"
         }
 
@@ -788,3 +823,143 @@ class OrderExecutor:
 
         except Exception as e:
             self.logger.error(f"查询或取消旧反针对订单时出错: {e}")
+
+    def rebalance_orders(
+        self,
+        current_orders: List[Dict[str, Any]],
+        target_orders: List[Dict[str, Any]],
+        imbalance_threshold: float = 0.3,
+        target_ratio: float = 0.5,
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """订单再平衡机制
+        
+        当检测到买卖订单严重不平衡时，自动调整订单分布。
+        同时处理买卖两个方向的平衡问题。
+        
+        策略：
+        1. 计算当前买卖比例和目标买卖比例
+        2. 如果不平衡超过阈值，同时调整两侧订单
+        3. 多的一侧：清理远离净值的订单
+        4. 少的一侧：从目标订单中补充靠近净值的订单
+        
+        Args:
+            current_orders: 当前订单列表（来自交易所）
+            target_orders: 目标订单列表（算法生成）
+            imbalance_threshold: 不平衡触发阈值（默认30%）
+            target_ratio: 目标买卖比例（默认0.5，即50%买50%卖）
+            
+        Returns:
+            Tuple[需要添加的订单, 需要取消的订单]
+        """
+        # 1. 统计当前买卖订单
+        current_buy = [o for o in current_orders if o.get("side") == "BUY"]
+        current_sell = [o for o in current_orders if o.get("side") == "SELL"]
+        total_current = len(current_orders)
+        
+        if total_current == 0:
+            self.logger.debug("当前无订单，跳过再平衡")
+            return [], []
+        
+        buy_ratio = len(current_buy) / total_current
+        sell_ratio = len(current_sell) / total_current
+        imbalance = abs(buy_ratio - target_ratio)
+        
+        self.logger.debug(
+            f"📊 买卖平衡检查: BUY={len(current_buy)} ({buy_ratio:.1%}), "
+            f"SELL={len(current_sell)} ({sell_ratio:.1%}), 不平衡度={imbalance:.1%}"
+        )
+        
+        # 2. 检查是否需要再平衡
+        if imbalance < imbalance_threshold:
+            self.logger.debug(f"买卖平衡正常（不平衡度 {imbalance:.1%} < 阈值 {imbalance_threshold:.1%}）")
+            return [], []
+        
+        self.logger.warning(
+            f"⚠️ 买卖订单严重不平衡！BUY={len(current_buy)}, SELL={len(current_sell)}, "
+            f"不平衡度={imbalance:.1%}（阈值: {imbalance_threshold:.1%}）"
+        )
+        
+        # 3. 计算目标订单数量（维持总量不变，调整比例）
+        target_buy_count = int(total_current * target_ratio)
+        target_sell_count = total_current - target_buy_count
+        
+        add_orders = []
+        cancel_orders = []
+        
+        # 4. 获取目标订单
+        target_buy_orders = [o for o in target_orders if o.get("direction") == "bid"]
+        target_sell_orders = [o for o in target_orders if o.get("direction") == "ask"]
+        
+        # 按价格排序（买单降序，卖单升序 - 优先处理靠近净值的订单）
+        target_buy_orders.sort(key=lambda o: float(o.get("price", 0)), reverse=True)
+        target_sell_orders.sort(key=lambda o: float(o.get("price", 0)))
+        
+        # 5. 处理买单
+        buy_diff = target_buy_count - len(current_buy)
+        if buy_diff > 0:
+            # 买单不足，需要补充
+            for order in target_buy_orders[:buy_diff]:
+                add_orders.append({
+                    "symbol": self.symbol,
+                    "side": "BUY",
+                    "type": "LIMIT",
+                    "timeInForce": "GTC",
+                    "bizType": "SPOT",
+                    "price": order["price"],
+                    "quantity": order.get("quantity", order.get("amount")),
+                    "quoteQty": None,
+                    "order_purpose": "rebalance",
+                })
+            self.logger.info(f"🔄 再平衡: 补充 {buy_diff} 个买单")
+        elif buy_diff < 0:
+            # 买单过多，清理远端买单
+            need_cancel = abs(buy_diff)
+            mm_buy = [
+                o for o in current_buy 
+                if (o.get("clientOrderId", "") or "").startswith("mm_")
+            ]
+            # 按价格升序（先清理最低价的买单，即离净值最远的）
+            mm_buy.sort(key=lambda o: float(o.get("price", 0)))
+            cancel_orders.extend(mm_buy[:need_cancel])
+            self.logger.info(f"🔄 再平衡: 清理 {min(need_cancel, len(mm_buy))} 个多余买单")
+        
+        # 6. 处理卖单
+        sell_diff = target_sell_count - len(current_sell)
+        if sell_diff > 0:
+            # 卖单不足，需要补充
+            for order in target_sell_orders[:sell_diff]:
+                add_orders.append({
+                    "symbol": self.symbol,
+                    "side": "SELL",
+                    "type": "LIMIT",
+                    "timeInForce": "GTC",
+                    "bizType": "SPOT",
+                    "price": order["price"],
+                    "quantity": order.get("quantity", order.get("amount")),
+                    "quoteQty": None,
+                    "order_purpose": "rebalance",
+                })
+            self.logger.info(f"🔄 再平衡: 补充 {sell_diff} 个卖单")
+        elif sell_diff < 0:
+            # 卖单过多，清理远端卖单
+            need_cancel = abs(sell_diff)
+            mm_sell = [
+                o for o in current_sell 
+                if (o.get("clientOrderId", "") or "").startswith("mm_")
+            ]
+            # 按价格降序（先清理最高价的卖单，即离净值最远的）
+            mm_sell.sort(key=lambda o: float(o.get("price", 0)), reverse=True)
+            cancel_orders.extend(mm_sell[:need_cancel])
+            self.logger.info(f"🔄 再平衡: 清理 {min(need_cancel, len(mm_sell))} 个多余卖单")
+        
+        # 7. 汇总日志
+        if add_orders or cancel_orders:
+            self.logger.info(
+                f"🔄 再平衡结果: "
+                f"添加 {len([o for o in add_orders if o['side']=='BUY'])} 买单 + "
+                f"{len([o for o in add_orders if o['side']=='SELL'])} 卖单, "
+                f"取消 {len([o for o in cancel_orders if o.get('side')=='BUY'])} 买单 + "
+                f"{len([o for o in cancel_orders if o.get('side')=='SELL'])} 卖单"
+            )
+        
+        return add_orders, cancel_orders

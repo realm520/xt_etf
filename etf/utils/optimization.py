@@ -156,11 +156,18 @@ def optimize_order_matching(
         goal_min_price = goal["min_price"]
         goal_max_price = goal["max_price"]
         goal_amount = goal["amount"]
+        goal_side = "SELL" if goal["direction"] == "ask" else "BUY"
         
         # O(log n + k)查找价格范围内的订单
         valid_market_orders = find_orders_in_price_range(
             price_index, goal_min_price, goal_max_price
         )
+        
+        # ✅ 关键修复：按方向过滤订单（防止买卖混淆导致的不平衡）
+        valid_market_orders = [
+            order for order in valid_market_orders
+            if order.get("side") == goal_side
+        ]
         
         # 过滤掉部分成交的订单
         valid_market_orders = [
