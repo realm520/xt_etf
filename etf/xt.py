@@ -120,7 +120,7 @@ class Spot:
         res = None
 
         try:
-            print(self.host + url)
+            # 不打印 URL，避免日志过多
             resp = requests.request(method, self.host + url, **kwargs)
             resp.raise_for_status()
             res = resp.json()

@@ -450,7 +450,8 @@ class ImprovedNetValue:
                 bid_0_price = float(depth["bids"][0][0])
                 ask_0_price = float(depth["asks"][0][0])
                 mid_price = (bid_0_price + ask_0_price) / 2
-                logger.debug(f"{self.symbol} 中间价: {mid_price}")
+                # 使用 INFO 级别显示价格，方便调试
+                logger.info(f"📊 {self.symbol} 现货价格: {mid_price:.4f} (bid={bid_0_price:.4f}, ask={ask_0_price:.4f})")
                 return mid_price
             else:
                 logger.error(f"获取{self.symbol}市场深度失败")
@@ -475,6 +476,9 @@ class ImprovedNetValue:
 
         # 计算价格变化率
         v = (p1 - p0) / p0
+
+        # 显示价格变化详情（INFO级别）
+        logger.info(f"💹 价格变化: p0={p0:.4f} → p1={p1:.4f}, 变化率={v:.6f} ({v*100:.4f}%)")
 
         # 异常保护：限制单次最大变化
         if abs(v) > self.max_single_change:
@@ -509,6 +513,7 @@ class ImprovedNetValue:
         # 计算净值变化
         side = 1 if v > 0 else -1
         net_value = self.net_value_data["net_value"]
+        old_net_value = net_value
 
         # 处理再平衡
         while abs(v) > self.rebalance:
@@ -534,7 +539,9 @@ class ImprovedNetValue:
         else:
             net_value = net_value * (1 - self.m_lever * v)
 
-        logger.debug(f"净值计算: 价格变化={v:.4f}, 新净值={net_value:.6f}")
+        # 显示净值计算详情（INFO级别）
+        net_value_change = net_value - old_net_value
+        logger.info(f"📈 净值计算: {old_net_value:.6f} → {net_value:.6f}, 变化={net_value_change:+.6f} (杠杆={self.m_lever}x, {'做多' if self.long else '做空'})")
         return net_value
 
     def cal_fee(self, net_value: float) -> float:
@@ -707,12 +714,11 @@ class ImprovedNetValue:
                     except Exception as e:
                         logger.error(f"记录净值指标失败: {e}")
 
-                logger.debug(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] "
-                    f"净值更新: {net_value_after_fee:.6f}, "
-                    f"价格: {mid_price:.4f}, "
-                    f"变化率: {net_value_change_rate:.4%}, "
-                    f"更新次数: {self.net_value_data['update_count']}"
+                logger.info(
+                    f"✅ [{datetime.now().strftime('%H:%M:%S')}] "
+                    f"净值={net_value_after_fee:.6f}, "
+                    f"变化率={net_value_change_rate:+.4%}, "
+                    f"次数={self.net_value_data['update_count']}"
                 )
 
                 # 检查净值异常
