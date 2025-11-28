@@ -2038,7 +2038,7 @@ class WashController:
             - 等待初始化完成（每秒检查一次，最多等待300秒）
             - 随机延迟启动（1-5秒）
             - 固定间隔 + 随机抖动（±20%）
-            - 根据washing_lambda作为基准间隔（默认15秒）
+            - 根据washing_lambda作为基准间隔（默认10秒）
             - 确保每分钟稳定执行指定次数（默认4次）
             - 更新价格趋势（每5分钟切换）
 
@@ -2063,7 +2063,7 @@ class WashController:
         logging.info(f"最终使用的策略名: {strategy_name}")
         logging.info(f"交易对symbol: {config.get('symbol', '❌ 不存在')}")
         logging.info(f"洗盘功能启用: {config.get('Enable_wash_trading', False)}")
-        logging.info(f"washing_lambda: {config.get('washing_lambda', 15)}")
+        logging.info(f"washing_lambda: {config.get('washing_lambda', 10)}")
         logging.info("=" * 70)
         logging.info("")
         
@@ -2144,8 +2144,8 @@ class WashController:
             self.volume_target_manager = None
             logging.info("ℹ️ 波动率驱动成交量目标管理器已禁用，使用固定间隔模式")
 
-        # ✅ 从配置读取基准间隔（默认15秒 → 1分钟4次，作为fallback）
-        base_interval = config.get("washing_lambda", 15)
+        # ✅ 从配置读取基准间隔（默认10秒 → 1分钟6次，作为fallback）
+        base_interval = config.get("washing_lambda", 10)
 
         logging.info("")
         logging.info("=" * 70)

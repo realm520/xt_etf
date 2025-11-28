@@ -275,7 +275,7 @@ def get_parser():
         "--hedging-interval", type=int, default=20, help="Hedging interval in seconds."
     )
     parser.add_argument(
-        "--washing-lambda", type=int, default=15, help="Washing base interval in seconds (default: 15)."
+        "--washing-lambda", type=int, default=10, help="Washing base interval in seconds (default: 10)."
     )
     parser.add_argument(
         "--kline-continuity-interval",
