@@ -220,6 +220,7 @@ def get_available_strategies(config_file: str = "config/strategies.yaml") -> Lis
     """从配置目录获取所有可用策略
     
     扫描 config/ 目录下的 <strategy>.yaml 文件
+    如果找不到配置文件，返回默认策略列表
     
     Args:
         config_file: 全局配置文件相对路径
@@ -227,11 +228,15 @@ def get_available_strategies(config_file: str = "config/strategies.yaml") -> Lis
     Returns:
         策略名称列表
     """
+    # 默认策略列表（当配置文件不存在时使用，如 pip 安装场景）
+    DEFAULT_STRATEGIES = ["stg3l", "stg3s", "stg5l", "stg5s", "ton3l", "ton3s"]
+    
     strategies = []
     config_path = find_config_file(config_file)
     
     if config_path is None:
-        return []
+        logging.warning(f"配置文件 {config_file} 未找到，使用默认策略列表")
+        return DEFAULT_STRATEGIES
     
     config_dir = Path(config_path).parent
     
@@ -245,6 +250,11 @@ def get_available_strategies(config_file: str = "config/strategies.yaml") -> Lis
                     strategies.append(yaml_file.stem)
         except Exception:
             pass
+    
+    # 如果没有找到任何策略配置文件，返回默认列表
+    if not strategies:
+        logging.warning("未找到策略配置文件，使用默认策略列表")
+        return DEFAULT_STRATEGIES
     
     return sorted(strategies)
 
