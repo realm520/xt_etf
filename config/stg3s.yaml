@@ -1,0 +1,8 @@
+# STG 3x 做空策略配置
+
+strategy:
+  prefix: "stg3s"
+  env: "prod"
+  bnsymbol: "STGUSDT"
+  currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
+

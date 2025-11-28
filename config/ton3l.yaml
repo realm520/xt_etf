@@ -1,0 +1,11 @@
+# TON 3x 做多策略配置
+# 覆盖 strategies.yaml 中的默认值
+
+strategy:
+  prefix: "ton3l"
+  env: "qa"
+  bnsymbol: "TONUSDT"
+  currencies: ["USDT", "TON3L", "TON3S"]
+
+
+

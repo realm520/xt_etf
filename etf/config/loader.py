@@ -26,10 +26,11 @@ def find_config_file(config_file: str = "config/strategies.yaml") -> Optional[st
     """查找配置文件路径
     
     查找顺序：
-    1. 环境变量 XT_ETF_CONFIG 指定的路径
-    2. 当前目录的 config/strategies.yaml
-    3. 项目根目录的 config/strategies.yaml（相对于此文件）
-    4. 用户配置目录 ~/.config/xt_etf/strategies.yaml
+    1. 环境变量 ETF_CONFIG_PATH 指定的绝对路径（最高优先级）
+    2. 环境变量 XT_ETF_CONFIG 指定的路径（向后兼容）
+    3. 当前目录的 config/strategies.yaml
+    4. 项目根目录的 config/strategies.yaml（相对于此文件）
+    5. 用户配置目录 ~/.config/xt_etf/strategies.yaml
     
     Args:
         config_file: 配置文件相对路径
@@ -40,26 +41,74 @@ def find_config_file(config_file: str = "config/strategies.yaml") -> Optional[st
     # 提取文件名用于备选路径查找
     config_filename = Path(config_file).name
     
-    # 1. 环境变量指定的路径（最高优先级）
+    # 1. ETF_CONFIG_PATH 环境变量（最高优先级，支持绝对路径）
+    env_config_path = os.getenv("ETF_CONFIG_PATH")
+    if env_config_path:
+        if os.path.exists(env_config_path):
+            logging.info(f"使用 ETF_CONFIG_PATH 环境变量: {env_config_path}")
+            return env_config_path
+        else:
+            logging.warning(f"ETF_CONFIG_PATH 指定的文件不存在: {env_config_path}")
+    
+    # 2. XT_ETF_CONFIG 环境变量（向后兼容）
     env_config = os.getenv("XT_ETF_CONFIG")
     if env_config and os.path.exists(env_config):
+        logging.info(f"使用 XT_ETF_CONFIG 环境变量: {env_config}")
         return env_config
     
-    # 2. 当前目录的配置文件
+    # 3. 当前目录的配置文件
     if os.path.exists(config_file):
         return config_file
     
-    # 3. 项目根目录（相对于 loader.py 向上3级: etf/config/loader.py -> 项目根）
+    # 4. 项目根目录（相对于 loader.py 向上2级: etf/config/loader.py -> 项目根）
     project_root = Path(__file__).parent.parent.parent
     project_config = project_root / "config" / config_filename
     if project_config.exists():
         return str(project_config)
     
-    # 4. 用户配置目录
+    # 5. 用户配置目录
     user_config = Path.home() / ".config" / "xt_etf" / config_filename
     if user_config.exists():
         return str(user_config)
     
+    return None
+
+
+
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """深度合并两个字典，override 覆盖 base
+    
+    Args:
+        base: 基础字典
+        override: 覆盖字典
+        
+    Returns:
+        合并后的新字典
+    """
+    result = dict(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _find_strategy_file(strategy_name: str, global_config_path: str) -> Optional[str]:
+    """查找策略特定配置文件
+    
+    Args:
+        strategy_name: 策略名称
+        global_config_path: 全局配置文件路径
+        
+    Returns:
+        策略配置文件路径，如果不存在则返回 None
+    """
+    config_dir = Path(global_config_path).parent
+    strategy_file = config_dir / f"{strategy_name}.yaml"
+    
+    if strategy_file.exists():
+        return str(strategy_file)
     return None
 
 
@@ -95,15 +144,20 @@ def load_strategy_config(
     config_file: str = "config/strategies.yaml",
     exit_on_error: bool = False
 ) -> Dict[str, Any]:
-    """加载策略配置
+    """加载策略配置（全局默认 + 预设 + 策略特定覆盖）
+    
+    配置合并优先级（从低到高）：
+    1. 全局默认配置 (defaults)
+    2. 订单簿预设 (orderbook_presets)
+    3. 策略特定配置 (config/<strategy>.yaml)
     
     Args:
         strategy_name: 策略名称
-        config_file: 配置文件相对路径
-        exit_on_error: 如果为 True，找不到策略时退出程序；否则返回空字典
+        config_file: 全局配置文件相对路径
+        exit_on_error: 如果为 True，找不到策略时退出程序
         
     Returns:
-        策略配置字典，如果策略不存在且 exit_on_error=False 则返回空字典
+        合并后的策略配置字典
     """
     import sys
     
@@ -114,23 +168,47 @@ def load_strategy_config(
             logging.error(f"配置文件 {config_file} 不存在")
             sys.exit(1)
         else:
-            logging.warning(f"配置文件 {config_file} 不存在，使用默认配置")
+            logging.warning(f"配置文件 {config_file} 不存在")
             return {}
 
     try:
         with open(config_path, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f)
+            global_config = yaml.safe_load(f)
 
-        if "strategies" in config and strategy_name in config["strategies"]:
-            logging.info(f"成功加载策略配置: {strategy_name} (from {config_path})")
-            return config["strategies"][strategy_name]
-        else:
+        # 1. 从全局默认配置开始
+        result = dict(global_config.get("defaults", {}))
+        
+        # 2. 加载策略特定配置文件
+        strategy_file = _find_strategy_file(strategy_name, config_path)
+        
+        if not strategy_file:
             if exit_on_error:
-                logging.error(f"策略 {strategy_name} 在配置文件中不存在")
+                logging.error(f"策略配置文件 config/{strategy_name}.yaml 不存在")
                 sys.exit(1)
             else:
-                logging.warning(f"策略 {strategy_name} 在配置文件中不存在")
-                return {}
+                logging.warning(f"策略配置文件 config/{strategy_name}.yaml 不存在")
+                return result
+        
+        with open(strategy_file, "r", encoding="utf-8") as f:
+            strategy_data = yaml.safe_load(f)
+            strategy_config = strategy_data.get("strategy", {})
+        
+        logging.info(f"加载策略配置: {strategy_file}")
+        
+        # 3. 应用订单簿预设
+        orderbook_preset = strategy_config.get("orderbook_preset")
+        if orderbook_preset and "orderbook_presets" in global_config:
+            preset = global_config["orderbook_presets"].get(orderbook_preset, {})
+            result = _deep_merge(result, preset)
+            logging.debug(f"应用订单簿预设: {orderbook_preset}")
+        
+        # 4. 应用策略特定配置（最高优先级）
+        strategy_overrides = {k: v for k, v in strategy_config.items() 
+                            if k not in ("orderbook_preset",)}
+        result = _deep_merge(result, strategy_overrides)
+        
+        return result
+        
     except Exception as e:
         logging.error(f"加载配置文件失败: {e}")
         if exit_on_error:
@@ -139,24 +217,36 @@ def load_strategy_config(
 
 
 def get_available_strategies(config_file: str = "config/strategies.yaml") -> List[str]:
-    """从配置文件动态获取所有可用策略
+    """从配置目录获取所有可用策略
+    
+    扫描 config/ 目录下的 <strategy>.yaml 文件
     
     Args:
-        config_file: 配置文件相对路径
+        config_file: 全局配置文件相对路径
         
     Returns:
         策略名称列表
     """
+    strategies = []
     config_path = find_config_file(config_file)
+    
     if config_path is None:
         return []
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-        return list(config.get("strategies", {}).keys())
-    except Exception as e:
-        logging.error(f"加载策略列表失败: {e}")
-        return []
+    
+    config_dir = Path(config_path).parent
+    
+    for yaml_file in config_dir.glob("*.yaml"):
+        if yaml_file.name == "strategies.yaml":
+            continue
+        try:
+            with open(yaml_file, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+                if data and "strategy" in data:
+                    strategies.append(yaml_file.stem)
+        except Exception:
+            pass
+    
+    return sorted(strategies)
 
 
 # ============================================================================

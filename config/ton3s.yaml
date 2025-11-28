@@ -1,0 +1,9 @@
+# TON 3x 做空策略配置
+
+strategy:
+  prefix: "ton3s"
+  env: "qa"
+  bnsymbol: "TONUSDT"
+  currencies: ["USDT", "TON3S", "TON3L"]
+
+

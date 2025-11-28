@@ -1,0 +1,9 @@
+# STG 3x 做多策略配置
+
+strategy:
+  prefix: "stg3l"
+  env: "qa"
+  bnsymbol: "STGUSDT"
+  currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
+
+

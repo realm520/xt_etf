@@ -1,0 +1,8 @@
+# STG 5x 做多策略配置
+
+strategy:
+  prefix: "stg5l"
+  env: "prod"
+  bnsymbol: "STGUSDT"
+  currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
+
