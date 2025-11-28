@@ -11,12 +11,6 @@ strategies:
     bnsymbol: "TONUSDT"
     currencies: ["USDT", "TON3L", "TON3S"]
 
-    # 精度设置
-    precision: 6
-    prec_amount: 2
-    precision_amount: 0
-    precision_price: 4
-
     # 时间间隔（秒）- 中低频优化
     sleep_interval: 10       # 主循环间隔
     Hedging_interval: 20
@@ -108,12 +102,6 @@ strategies:
     bnsymbol: "TONUSDT"
     currencies: ["USDT", "TON3S", "TON3L"]
 
-    # 精度设置
-    precision: 6
-    prec_amount: 2
-    precision_amount: 0
-    precision_price: 4
-
     # 时间间隔（秒）- 中低频优化
     sleep_interval: 10       # 主循环间隔
     Hedging_interval: 20
@@ -204,12 +192,6 @@ strategies:
     bnsymbol: "STGUSDT"
     currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
 
-    # 精度设置
-    precision: 6
-    prec_amount: 2
-    precision_amount: 0
-    precision_price: 4
-
     # 时间间隔（秒）- 中低频优化
     sleep_interval: 10       # 主循环间隔 - 从5秒改为10秒
     Hedging_interval: 20
@@ -263,12 +245,6 @@ strategies:
     bnsymbol: "STGUSDT"
     currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
 
-    # 精度设置
-    precision: 6
-    prec_amount: 2
-    precision_amount: 0
-    precision_price: 4
-
     # 时间间隔（秒）- 中低频优化
     sleep_interval: 10       # 主循环间隔 - 从1秒改为10秒
     Hedging_interval: 20
@@ -321,12 +297,6 @@ strategies:
 
     bnsymbol: "STGUSDT"
     currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
-
-    # 精度设置
-    precision: 6
-    prec_amount: 2
-    precision_amount: 0
-    precision_price: 4
 
     # 时间间隔（秒）- 中低频优化
     sleep_interval: 15       # 主循环间隔 - 从1秒改为15秒（高杠杆更谨慎）
@@ -384,12 +354,6 @@ strategies:
 
     bnsymbol: "STGUSDT"
     currencies: ["USDT", "STG5L", "STG5S", "STG3L", "STG3S"]
-
-    # 精度设置
-    precision: 6
-    prec_amount: 2
-    precision_amount: 0
-    precision_price: 4
 
     # 时间间隔（秒）- 中低频优化
     sleep_interval: 15       # 主循环间隔 - 从1秒改为15秒（高杠杆更谨慎）

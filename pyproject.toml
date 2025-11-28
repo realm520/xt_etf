@@ -75,7 +75,7 @@ include = ["etf*"]
 py-modules = ["run_etf", "run_net_value", "hedging"]
 
 [tool.setuptools.package-data]
-etf = ["*.yaml", "*.json", "config/*.yaml"]
+etf = ["*.yaml", "*.json"]
 
 [tool.ruff]
 preview = true

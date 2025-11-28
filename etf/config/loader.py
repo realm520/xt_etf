@@ -26,8 +26,10 @@ def find_config_file(config_file: str = "config/strategies.yaml") -> Optional[st
     """查找配置文件路径
     
     查找顺序：
-    1. 当前目录的 config/strategies.yaml
-    2. 包内的 etf/config/strategies.yaml（uvx 安装时使用）
+    1. 环境变量 XT_ETF_CONFIG 指定的路径
+    2. 当前目录的 config/strategies.yaml
+    3. 项目根目录的 config/strategies.yaml（相对于此文件）
+    4. 用户配置目录 ~/.config/xt_etf/strategies.yaml
     
     Args:
         config_file: 配置文件相对路径
@@ -35,25 +37,28 @@ def find_config_file(config_file: str = "config/strategies.yaml") -> Optional[st
     Returns:
         配置文件的绝对路径，如果找不到则返回 None
     """
-    # 1. 首先检查当前目录
+    # 提取文件名用于备选路径查找
+    config_filename = Path(config_file).name
+    
+    # 1. 环境变量指定的路径（最高优先级）
+    env_config = os.getenv("XT_ETF_CONFIG")
+    if env_config and os.path.exists(env_config):
+        return env_config
+    
+    # 2. 当前目录的配置文件
     if os.path.exists(config_file):
         return config_file
     
-    # 2. 检查包内配置文件
-    try:
-        try:
-            from importlib.resources import files
-            pkg_config = files("etf").joinpath("config", "strategies.yaml")
-            if pkg_config.is_file():
-                return str(pkg_config)
-        except (ImportError, AttributeError, TypeError):
-            # Python 3.8 降级方案
-            import pkg_resources as pkg_res
-            config_path = pkg_res.resource_filename("etf", "config/strategies.yaml")
-            if os.path.exists(config_path):
-                return config_path
-    except Exception:
-        pass
+    # 3. 项目根目录（相对于 loader.py 向上3级: etf/config/loader.py -> 项目根）
+    project_root = Path(__file__).parent.parent.parent
+    project_config = project_root / "config" / config_filename
+    if project_config.exists():
+        return str(project_config)
+    
+    # 4. 用户配置目录
+    user_config = Path.home() / ".config" / "xt_etf" / config_filename
+    if user_config.exists():
+        return str(user_config)
     
     return None
 
