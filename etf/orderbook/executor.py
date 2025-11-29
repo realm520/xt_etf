@@ -358,6 +358,23 @@ class OrderExecutor:
                 anti_pin_config.get("anti_pin_price_buy"),
             )
 
+        # === 5.5 买卖差价验证和修复 ===
+        spread_verify_result = None
+        if best_sell > 0 and best_buy > 0:
+            # 等待订单上盘后再验证
+            time.sleep(0.2)
+            
+            spread_verify_result = self.verify_and_repair_spread(
+                target_best_buy=best_buy,
+                target_best_sell=best_sell,
+            )
+            
+            if not spread_verify_result.get("spread_ok"):
+                self.logger.warning(
+                    f"⚠️ 差价验证: {spread_verify_result.get('message')} | "
+                    f"修复: {'成功' if spread_verify_result.get('repaired') else '失败'}"
+                )
+
         # === 6. 生成执行总结 ===
         execution_time = time.time() - start_time
 
@@ -963,3 +980,274 @@ class OrderExecutor:
             )
         
         return add_orders, cancel_orders
+
+    # ==================== 买卖差价验证和修复 ====================
+    
+    def _get_actual_spread_from_orders(
+        self, orders: List[Dict[str, Any]]
+    ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        """从订单列表计算实际买卖一和差价
+        
+        Args:
+            orders: 当前订单列表
+            
+        Returns:
+            Tuple[best_bid, best_ask, spread_ratio]:
+            - best_bid: 买一价格（最高买价），无买单时为None
+            - best_ask: 卖一价格（最低卖价），无卖单时为None
+            - spread_ratio: 差价比例 = (best_ask - best_bid) / best_bid，
+                           买卖一有任一缺失时为None
+        """
+        buy_prices = []
+        sell_prices = []
+        
+        for order in orders:
+            price = float(order.get("price", 0))
+            side = order.get("side", "")
+            
+            if price <= 0:
+                continue
+                
+            if side == "BUY":
+                buy_prices.append(price)
+            elif side == "SELL":
+                sell_prices.append(price)
+        
+        # 计算买一（最高买价）
+        best_bid = max(buy_prices) if buy_prices else None
+        # 计算卖一（最低卖价）
+        best_ask = min(sell_prices) if sell_prices else None
+        
+        # 计算差价比例（需要买卖双方都有订单）
+        spread_ratio = None
+        if best_bid is not None and best_ask is not None and best_bid > 0:
+            spread_ratio = (best_ask - best_bid) / best_bid
+        
+        return best_bid, best_ask, spread_ratio
+    
+    def verify_and_repair_spread(
+        self,
+        target_best_buy: float,
+        target_best_sell: float,
+    ) -> Dict[str, Any]:
+        """验证并修复买卖差价（严格模式：差价只能≤目标）
+        
+        规则：实际差价必须≤目标差价，否则立即修复
+        
+        执行流程：
+        1. 获取当前市场订单
+        2. 计算实际买卖一和差价
+        3. 检查：实际买一>=目标买一 且 实际卖一<=目标卖一
+        4. 不满足条件则立即补单修复
+        
+        Args:
+            target_best_buy: 目标买一价格
+            target_best_sell: 目标卖一价格
+            
+        Returns:
+            Dict: 验证和修复结果
+        """
+        result = {
+            "checked": False,
+            "spread_ok": True,
+            "actual_best_bid": None,
+            "actual_best_ask": None,
+            "actual_spread_ratio": None,
+            "target_spread_ratio": None,
+            "repaired": False,
+            "repair_orders": 0,
+            "message": "",
+        }
+        
+        # 1. 获取当前市场订单
+        try:
+            current_orders = self.order_manager.client.get_open_orders(
+                symbol=self.symbol
+            )
+        except Exception as e:
+            self.logger.error(f"获取订单失败，无法验证差价: {e}")
+            result["message"] = f"获取订单失败: {e}"
+            return result
+        
+        result["checked"] = True
+        
+        # 2. 计算实际买卖差价
+        actual_bid, actual_ask, actual_spread = self._get_actual_spread_from_orders(
+            current_orders
+        )
+        
+        result["actual_best_bid"] = actual_bid
+        result["actual_best_ask"] = actual_ask
+        result["actual_spread_ratio"] = actual_spread
+        
+        # 3. 计算目标差价
+        target_spread_ratio = (target_best_sell - target_best_buy) / target_best_buy if target_best_buy > 0 else 0
+        result["target_spread_ratio"] = target_spread_ratio
+        
+        # 4. 检查订单完整性
+        if actual_bid is None or actual_ask is None:
+            buy_count = len([o for o in current_orders if o.get('side') == 'BUY'])
+            sell_count = len([o for o in current_orders if o.get('side') == 'SELL'])
+            self.logger.warning(
+                f"⚠️ 订单簿不完整: 买单={buy_count}, 卖单={sell_count}，需要修复"
+            )
+            result["spread_ok"] = False
+            
+            # 立即修复
+            repair_result = self._repair_spread(
+                current_orders=current_orders,
+                actual_bid=actual_bid or 0,
+                actual_ask=actual_ask or float('inf'),
+                target_best_buy=target_best_buy,
+                target_best_sell=target_best_sell,
+            )
+            result["repaired"] = repair_result["success"]
+            result["repair_orders"] = repair_result["orders_added"]
+            result["message"] = f"订单不完整，已修复: {repair_result['message']}"
+            return result
+        
+        # 5. 严格检查：实际差价必须<=目标差价
+        # 即：实际买一>=目标买一 且 实际卖一<=目标卖一
+        bid_ok = actual_bid >= target_best_buy
+        ask_ok = actual_ask <= target_best_sell
+        
+        self.logger.info(
+            f"📊 差价验证: 实际买1={actual_bid:.6f}{'✓' if bid_ok else '✗'}, "
+            f"卖1={actual_ask:.6f}{'✓' if ask_ok else '✗'} | "
+            f"目标买1={target_best_buy:.6f}, 卖1={target_best_sell:.6f} | "
+            f"实际差价={actual_spread*100:.4f}%, 目标差价={target_spread_ratio*100:.4f}%"
+        )
+        
+        # 6. 判断是否需要修复
+        if not bid_ok or not ask_ok:
+            result["spread_ok"] = False
+            issues = []
+            if not bid_ok:
+                issues.append(f"买一偏低({actual_bid:.6f}<{target_best_buy:.6f})")
+            if not ask_ok:
+                issues.append(f"卖一偏高({actual_ask:.6f}>{target_best_sell:.6f})")
+            
+            self.logger.warning(f"🚨 差价异常: {', '.join(issues)}，立即修复")
+            
+            # 立即修复
+            repair_result = self._repair_spread(
+                current_orders=current_orders,
+                actual_bid=actual_bid,
+                actual_ask=actual_ask,
+                target_best_buy=target_best_buy,
+                target_best_sell=target_best_sell,
+            )
+            result["repaired"] = repair_result["success"]
+            result["repair_orders"] = repair_result["orders_added"]
+            result["message"] = repair_result["message"]
+        else:
+            result["message"] = "差价正常"
+        
+        return result
+    
+    def _repair_spread(
+        self,
+        current_orders: List[Dict[str, Any]],
+        actual_bid: float,
+        actual_ask: float,
+        target_best_buy: float,
+        target_best_sell: float,
+    ) -> Dict[str, Any]:
+        """修复买卖差价（严格模式：任何偏差都修复）
+        
+        修复策略：
+        1. 如果实际买一 < 目标买一：补充买单到目标价位
+        2. 如果实际卖一 > 目标卖一：补充卖单到目标价位
+        
+        Args:
+            current_orders: 当前订单列表
+            actual_bid: 实际买一
+            actual_ask: 实际卖一
+            target_best_buy: 目标买一
+            target_best_sell: 目标卖一
+            
+        Returns:
+            Dict: 修复结果
+        """
+        result = {
+            "success": False,
+            "orders_added": 0,
+            "message": "",
+        }
+        
+        repair_orders = []
+        
+        # 获取精度配置
+        price_precision = 6  # 默认值
+        quantity_precision = 4  # 默认值
+        
+        if hasattr(self.order_manager, 'symbol_config_manager') and self.order_manager.symbol_config_manager:
+            price_precision = self.order_manager.symbol_config_manager.get_price_precision(self.symbol) or 6
+            quantity_precision = self.order_manager.symbol_config_manager.get_quantity_precision(self.symbol) or 4
+        
+        # 计算修复数量（使用最小有效数量）
+        min_quantity = 10 ** (-quantity_precision) * 10  # 最小数量的10倍，确保有效
+        
+        # 修复买单：实际买一 < 目标买一
+        if actual_bid < target_best_buy:
+            repair_price = round(target_best_buy, price_precision)
+            repair_qty = round(min_quantity, quantity_precision)
+            
+            repair_orders.append({
+                "symbol": self.symbol,
+                "side": "BUY",
+                "type": "LIMIT",
+                "price": str(repair_price),
+                "quantity": str(repair_qty),
+                "timeInForce": "GTC",
+                "clientOrderId": f"repair_bid_{self.order_manager.create_temp_id()}",
+            })
+            self.logger.info(
+                f"🔧 补充买单: 价格={repair_price}, 数量={repair_qty} "
+                f"(实际买1={actual_bid:.6f} → 目标={target_best_buy:.6f})"
+            )
+        
+        # 修复卖单：实际卖一 > 目标卖一
+        if actual_ask > target_best_sell:
+            repair_price = round(target_best_sell, price_precision)
+            repair_qty = round(min_quantity, quantity_precision)
+            
+            repair_orders.append({
+                "symbol": self.symbol,
+                "side": "SELL",
+                "type": "LIMIT",
+                "price": str(repair_price),
+                "quantity": str(repair_qty),
+                "timeInForce": "GTC",
+                "clientOrderId": f"repair_ask_{self.order_manager.create_temp_id()}",
+            })
+            self.logger.info(
+                f"🔧 补充卖单: 价格={repair_price}, 数量={repair_qty} "
+                f"(实际卖1={actual_ask:.6f} → 目标={target_best_sell:.6f})"
+            )
+        
+        # 执行修复订单
+        if not repair_orders:
+            result["message"] = "无需修复"
+            result["success"] = True
+            return result
+        
+        try:
+            # 批量下单
+            res = self.order_manager.client.batch_order(repair_orders)
+            
+            if res:
+                success_count = sum(1 for r in res if r.get("orderId"))
+                result["success"] = success_count > 0
+                result["orders_added"] = success_count
+                result["message"] = f"修复完成: {success_count}/{len(repair_orders)} 单成功"
+                self.logger.info(f"✅ {result['message']}")
+            else:
+                result["message"] = "修复下单失败"
+                self.logger.error(f"❌ {result['message']}")
+                
+        except Exception as e:
+            result["message"] = f"修复异常: {e}"
+            self.logger.error(f"❌ {result['message']}")
+        
+        return result
