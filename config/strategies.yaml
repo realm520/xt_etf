@@ -44,9 +44,73 @@ defaults:
   anti_pin_rate: 0.2
   bid_ask_spread: 0.008            # 默认 0.8% 价差
 
+  # 分层订单调整配置
+  layer_adjustment:
+    enabled: true                    # 是否启用分层调整
+    near_book:                       # 近盘口 (NAV ±0.5%)
+      min_depth: 100                 # 最小深度 (USDT)
+      max_imbalance: 0.30            # 最大不平衡度 30%
+      max_density: 0.002             # 最大价格间隔 0.2%
+      target_spread: 0.008           # 目标价差（继承 bid_ask_spread）
+    mid_book:                        # 中盘口 (0.5%-2%)
+      min_depth: 200                 # 最小深度 (USDT)
+      max_imbalance: 0.50            # 最大不平衡度 50%
+    far_book:                        # 远盘口 (2%-10%)
+      min_count: 10                  # 最小订单数
+      max_imbalance: 0.60            # 最大不平衡度 60%
+
+
+  # 分层平衡管理器配置（新增）
+  balance_manager:
+    enabled: true
+    
+    global:
+      order_limit: 200             # XT交易所订单上限
+      safety_margin: 5             # 安全余量
+      antipin_reserve: 5           # 反针对预留
+      check_interval: 5            # 检查间隔（秒）
+    
+    layers:
+      near:
+        range: [0, 0.005]          # NAV ±0.5%
+        imbalance_threshold: 0.10  # 10%触发调整
+        max_allowed_imbalance: 0.20
+        force_best_price: true     # 硬性保证买一卖一
+        priority: 100
+        max_adjustment_per_cycle: 5
+        bid_ask_spread: 0.008      # 继承主配置
+      
+      mid:
+        range: [0.005, 0.02]       # 0.5%-2%
+        imbalance_threshold: 0.10
+        max_allowed_imbalance: 0.30
+        priority: 50
+        max_adjustment_per_cycle: 8
+      
+      far:
+        range: [0.02, 0.10]        # 2%-10%
+        imbalance_threshold: 0.20  # 远盘口允许更大不平衡
+        max_allowed_imbalance: 0.50
+        priority: 20
+        max_adjustment_per_cycle: 10
+        defense_mode: true         # 防御优先：主要删除超额
+    
+    reliability:
+      protect_best_orders: true    # 保护买一卖一
+      protect_count: 2             # 保护前2档
+      max_retries: 3
+      emergency_repair_enabled: true
+
   # 订单更新控制
-  price_change_threshold: 0.003    # 价格变化阈值 0.3%
-  min_update_interval: 30          # 最小更新间隔（秒）
+  price_change_threshold: 0.001    # 价格变化阈值 0.1%（从0.3%降低，确保近盘口及时更新）
+  min_update_interval: 15          # 最小更新间隔（秒）（从30秒降低到15秒）
+  
+  # 近盘口强制对齐配置（新增）
+  near_book_alignment:
+    enabled: true                  # 启用近盘口强制对齐
+    max_deviation: 0.002           # 最大允许偏差 0.2%（超过则强制修复）
+    force_repair: true             # 超过偏差时强制修复
+    check_on_every_update: true    # 每次更新都检查
 
   # 订单簿算法配置
   orderbook_algorithm: "natural"

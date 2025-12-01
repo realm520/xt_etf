@@ -7,6 +7,7 @@ import numpy as np
 # 订单簿相关导入
 from etf.orderbook.base import OrderbookConfig, OrderbookFactory
 from etf.orderbook.executor import OrderExecutor
+from etf.orderbook.layer_balance import LayerBalanceChecker, LayerBalanceConfig
 from etf.utils.optimization import (
     optimize_order_matching, 
     performance_monitor, 
@@ -70,7 +71,100 @@ class MarketMaker:
         self.min_update_interval: float = 30.0  # 最小更新间隔（秒）
         
         # ✅ 订单执行器（每个交易对创建一个独立实例）
-        self.executor: Optional[OrderExecutor] = None  # 价格变化阈值（0.05%）
+        self.executor: Optional[OrderExecutor] = None
+        
+        # ✅ 分层平衡检查器
+        self.layer_balance_checker: Optional[LayerBalanceChecker] = None
+
+    def _check_near_book_alignment(
+        self,
+        symbol: str,
+        target_best_buy: float,
+        target_best_sell: float,
+        max_deviation: float = 0.002,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """检查近盘口订单是否对齐目标价格（强制对齐机制）
+        
+        即使价格变化未达到阈值，也需要检查买一卖一是否严重偏离目标。
+        这是防止卖一偏高问题的关键保护机制。
+        
+        Args:
+            symbol: 交易对符号
+            target_best_buy: 目标买一价格
+            target_best_sell: 目标卖一价格
+            max_deviation: 最大允许偏差（默认0.2%）
+            
+        Returns:
+            Tuple[需要修复, 偏差详情]
+        """
+        result = {
+            "needs_repair": False,
+            "actual_bid": None,
+            "actual_ask": None,
+            "bid_deviation": 0.0,
+            "ask_deviation": 0.0,
+            "message": "",
+        }
+        
+        try:
+            # 获取当前订单
+            current_orders = self.order_manager.client.get_open_orders(symbol=symbol)
+            
+            if not current_orders:
+                result["message"] = "无当前订单"
+                return False, result
+            
+            # 计算实际买一和卖一
+            buy_orders = [o for o in current_orders if o.get("side") == "BUY"]
+            sell_orders = [o for o in current_orders if o.get("side") == "SELL"]
+            
+            if not buy_orders or not sell_orders:
+                result["message"] = "买卖订单不完整"
+                result["needs_repair"] = True
+                return True, result
+            
+            # 找出最高买价和最低卖价
+            actual_bid = max(float(o.get("price", 0)) for o in buy_orders)
+            actual_ask = min(float(o.get("price", 0)) for o in sell_orders)
+            
+            result["actual_bid"] = actual_bid
+            result["actual_ask"] = actual_ask
+            
+            # 计算偏差
+            bid_deviation = (actual_bid - target_best_buy) / target_best_buy if target_best_buy > 0 else 0
+            ask_deviation = (actual_ask - target_best_sell) / target_best_sell if target_best_sell > 0 else 0
+            
+            result["bid_deviation"] = bid_deviation
+            result["ask_deviation"] = ask_deviation
+            
+            # 检查是否需要修复
+            bid_ok = abs(bid_deviation) <= max_deviation
+            ask_ok = ask_deviation <= max_deviation  # 卖一允许略低但不允许偏高
+            
+            if not bid_ok or not ask_ok:
+                result["needs_repair"] = True
+                issues = []
+                if not bid_ok:
+                    issues.append(f"买一偏差{bid_deviation*100:.2f}%")
+                if not ask_ok:
+                    issues.append(f"卖一偏高{ask_deviation*100:.2f}%")
+                result["message"] = f"近盘口偏差超限: {', '.join(issues)}"
+                
+                logging.warning(
+                    f"🚨 近盘口对齐检查: 实际买1={actual_bid:.6f}, 卖1={actual_ask:.6f} | "
+                    f"目标买1={target_best_buy:.6f}, 卖1={target_best_sell:.6f} | "
+                    f"偏差: 买1={bid_deviation*100:.2f}%, 卖1={ask_deviation*100:.2f}% | "
+                    f"{'需要修复' if result['needs_repair'] else '正常'}"
+                )
+                return True, result
+            else:
+                result["message"] = "近盘口对齐正常"
+                return False, result
+                
+        except Exception as e:
+            logging.error(f"近盘口对齐检查失败: {e}")
+            result["message"] = f"检查异常: {e}"
+            return False, result
 
     def _cancel_old_anti_pin_orders(
         self,
@@ -230,13 +324,46 @@ class MarketMaker:
                     self.order_manager.netvalue = netvalue
                     return
             else:
-                logging.debug(
-                    f"价格变化 {change_rate:.4%} 小于阈值 {self.price_change_threshold:.4%}，跳过订单更新 "
-                    f"(当前: {netvalue:.6f}, 上次: {self.last_netvalue:.6f})"
-                )
-                # 价格变化不大，仅更新净值但不重新下单
-                self.order_manager.netvalue = netvalue
-                return
+                # === 价格变化不大，但需要检查近盘口是否严重偏离 ===
+                # 读取近盘口对齐配置
+                near_book_config = config.get("near_book_alignment", {})
+                if near_book_config.get("enabled", True) and near_book_config.get("check_on_every_update", True):
+                    # 计算目标买一卖一
+                    bid_ask_spread = config.get("bid_ask_spread", 0.008)
+                    target_best_buy = netvalue * (1 - bid_ask_spread / 2)
+                    target_best_sell = netvalue * (1 + bid_ask_spread / 2)
+                    max_deviation = near_book_config.get("max_deviation", 0.002)
+                    
+                    needs_repair, alignment_info = self._check_near_book_alignment(
+                        symbol=symbol,
+                        target_best_buy=target_best_buy,
+                        target_best_sell=target_best_sell,
+                        max_deviation=max_deviation,
+                    )
+                    
+                    if needs_repair and near_book_config.get("force_repair", True):
+                        logging.warning(
+                            f"🚨 近盘口强制对齐触发: {alignment_info['message']} | "
+                            f"价格变化仅 {change_rate:.4%}，但近盘口偏差超限，强制更新订单簿"
+                        )
+                        price_changed = True  # 强制触发订单簿更新
+                    else:
+                        logging.debug(
+                            f"价格变化 {change_rate:.4%} 小于阈值 {self.price_change_threshold:.4%}，"
+                            f"近盘口对齐正常，跳过订单更新 "
+                            f"(当前: {netvalue:.6f}, 上次: {self.last_netvalue:.6f})"
+                        )
+                        # 价格变化不大且近盘口正常，仅更新净值但不重新下单
+                        self.order_manager.netvalue = netvalue
+                        return
+                else:
+                    logging.debug(
+                        f"价格变化 {change_rate:.4%} 小于阈值 {self.price_change_threshold:.4%}，跳过订单更新 "
+                        f"(当前: {netvalue:.6f}, 上次: {self.last_netvalue:.6f})"
+                    )
+                    # 价格变化不大，仅更新净值但不重新下单
+                    self.order_manager.netvalue = netvalue
+                    return
 
         # 记录新净值和更新时间
         self.last_netvalue = netvalue
@@ -398,6 +525,49 @@ class MarketMaker:
             "precision": price_precision,
             "prec_amount": quantity_precision,
         }
+
+        # === 6.5 分层平衡检查（检查器负责决定调整，执行器负责执行）===
+        nav = netvalue  # 净值作为NAV
+        if nav > 0 and len(current_orders) > 0:
+            # 初始化检查器（首次运行时）
+            if self.layer_balance_checker is None:
+                # 从配置读取分层平衡参数
+                balance_config = config.get("balance_manager", {})
+                if balance_config.get("enabled", True):
+                    self.layer_balance_checker = LayerBalanceChecker(
+                        config=None,  # 使用默认配置，后续可从YAML加载
+                        logger=logging.getLogger(config.get("strategy_name", "mm")),
+                    )
+                    logging.info("✅ 初始化分层平衡检查器")
+            
+            # 执行分层平衡检查
+            if self.layer_balance_checker is not None:
+                # 筛选做市订单
+                mm_orders = [
+                    o for o in current_orders 
+                    if str(o.get("clientOrderId", "")).startswith("mm_")
+                ]
+                
+                # 调用检查器获取调整动作
+                spread = config.get("bid_ask_spread", 0.008)
+                balance_add, balance_cancel = self.layer_balance_checker.check_and_adjust(
+                    current_orders=mm_orders,
+                    target_orders=goal_orders,
+                    nav=nav,
+                    spread=spread,
+                )
+                
+                # 将调整订单合并到目标订单
+                if balance_add:
+                    logging.info(f"🔧 分层平衡: 需补充 {len(balance_add)} 个订单")
+                    goal_orders.extend(balance_add)
+                
+                # 取消订单通过执行器的 rebalance 机制处理
+                if balance_cancel:
+                    logging.info(f"🔧 分层平衡: 需取消 {len(balance_cancel)} 个订单")
+                    # 将取消订单信息传递给执行器（通过标记）
+                    for order in balance_cancel:
+                        order["_balance_cancel"] = True
 
         # === 7. 使用OrderExecutor执行订单簿更新 ===
         summary = self.executor.execute_orderbook_update(

@@ -117,6 +117,7 @@ def optimize_order_matching(
     goal_orders: List[Dict[str, Any]],
     max_layer: Optional[int] = None,  # 新增：最大档位数限制
     cleanup_threshold: float = 1.5,   # 新增：清理阈值（150%）
+    near_book_priority: bool = True,  # 新增：近盘口优先处理
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     优化的订单匹配算法，将O(n²)复杂度降低到O(n log n)
@@ -147,9 +148,37 @@ def optimize_order_matching(
         all_max_prices = [goal["max_price"] for goal in goal_orders]
         global_min_price = min(all_min_prices)
         global_max_price = max(all_max_prices)
+        
+        # 计算中间价（用于判断近盘口）
+        mid_price = (global_min_price + global_max_price) / 2
     else:
         global_min_price = 0
         global_max_price = float('inf')
+        mid_price = 0
+    
+    # === 近盘口优先处理 ===
+    # 将目标订单按距离中间价的距离排序，近盘口订单优先处理
+    if near_book_priority and goal_orders and mid_price > 0:
+        # 分离买卖订单
+        bid_goals = [g for g in goal_orders if g.get("direction") == "bid"]
+        ask_goals = [g for g in goal_orders if g.get("direction") == "ask"]
+        
+        # 买单按价格降序（最高价优先 = 最近买一）
+        bid_goals.sort(key=lambda g: float(g.get("price", 0)), reverse=True)
+        # 卖单按价格升序（最低价优先 = 最近卖一）
+        ask_goals.sort(key=lambda g: float(g.get("price", 0)))
+        
+        # 交错合并，确保买一和卖一最先处理
+        sorted_goals = []
+        max_len = max(len(bid_goals), len(ask_goals))
+        for i in range(max_len):
+            if i < len(bid_goals):
+                sorted_goals.append(bid_goals[i])
+            if i < len(ask_goals):
+                sorted_goals.append(ask_goals[i])
+        
+        goal_orders = sorted_goals
+        logging.debug(f"🎯 近盘口优先: 已按价格距离排序 {len(goal_orders)} 个目标订单")
     
     # 遍历目标订单，O(m * log n)，其中m是goal_orders数量
     for goal in goal_orders:
