@@ -19,6 +19,7 @@ from ..utils.constants import (
     SIDE_BUY, SIDE_SELL, ORDER_TYPE_LIMIT,
     TIME_IN_FORCE_GTC, BIZ_TYPE_SPOT, DEFAULT_BATCH_SIZE
 )
+# LayerBalanceChecker 已移至 market_making.py 调用层
 
 
 @dataclass
@@ -78,6 +79,7 @@ class OrderExecutor:
         max_layer: Optional[int] = None,  # 新增：最大档位数（用于订单数量保护）
         logger: Optional[logging.Logger] = None,
         stats_print_interval: float = 10.0,  # 统计打印间隔（秒）
+        # layer_balance_config 已移至 market_making.py
     ):
         self.order_manager = order_manager
         self.symbol = symbol
@@ -91,6 +93,8 @@ class OrderExecutor:
         # 订单统计打印控制（基于时间）
         self.stats_print_interval = stats_print_interval  # 打印间隔（秒）
         self._last_stats_print_time: float = 0.0  # 上次打印时间
+
+        # 分层平衡检查已移至 market_making.py 调用层
 
     def execute_orderbook_update(
         self,
@@ -158,6 +162,33 @@ class OrderExecutor:
         # === 0.5 定期打印订单详细统计 ===
         self.print_order_stats(current_orders)
 
+        # === 0.55 清理残留洗盘订单 ===
+        # 洗盘订单应该立即成交，如果还挂在盘口说明有问题，必须清理
+        wash_orders_to_cancel = [
+            order for order in current_orders
+            if (order.get("clientOrderId") or "").startswith("wash_")
+        ]
+        if wash_orders_to_cancel:
+            self.logger.warning(
+                f"🧹 发现 {len(wash_orders_to_cancel)} 个残留洗盘订单，立即清理"
+            )
+            for order in wash_orders_to_cancel:
+                try:
+                    self.order_manager.cancel_order(order)
+                    self.logger.info(
+                        f"✅ 已撤销洗盘订单: {order.get('orderId')} | "
+                        f"{order.get('side')} {order.get('origQty')}@{order.get('price')}"
+                    )
+                except Exception as e:
+                    self.logger.error(f"❌ 撤销洗盘订单失败: {order.get('orderId')} - {e}")
+            
+            # 更新订单统计（排除已撤销的洗盘订单）
+            current_orders = [
+                o for o in current_orders 
+                if not (o.get("clientOrderId") or "").startswith("wash_")
+            ]
+            order_stats = self._count_orders_by_type(current_orders)
+
         # === 0.6 买卖平衡检查和修正 ===
         detailed_stats = self._count_orders_by_type_and_side(current_orders)
         current_buy = sum(stats["BUY"] for stats in detailed_stats.values())
@@ -195,45 +226,55 @@ class OrderExecutor:
                         f"🔄 再平衡计划: 添加 {len(rebalance_add)}, 取消 {len(rebalance_cancel)}"
                     )
 
+        # === 0.7 分层平衡检查已移至 market_making.py ===
+        # 检查器在调用 execute_orderbook_update 之前运行，
+        # 调整订单已合并到 target_orders 中传入
+
         # === 1. 订单匹配分析 ===
         optimized_add_orders, optimized_cancel_orders = self._match_orders(
             current_orders, target_orders
         )
 
-        # === 1.5 硬性订单上限保护（优化版：方案1+4）===
-        # 方案1: 考虑待取消的订单数量
-        # 方案4: 只计算做市订单数量，不把洗盘/对冲订单计入上限
+        # === 1.5 硬性订单上限保护（修复版：计算所有订单总数）===
+        # XT交易所 ORDER_006: 每个交易对最多200个挂单（所有类型订单的总和）
+        # 必须计算所有订单类型，不能只计算做市订单
         
         # 初始化变量（用于后续反针对订单保护）
-        effective_mm_count = order_stats['market_making']  # 默认值
+        effective_mm_count = order_stats['market_making']  # 做市订单数（用于反针对保护）
+        effective_total_count = sum(order_stats.values())  # 所有订单总数（默认值）
         
         if self.max_layer is not None:
-            anti_pin_reserve = 5  # 预留5个槽位给反针对订单（从10减少到5）
+            anti_pin_reserve = 5  # 预留5个槽位给反针对订单
             
-            # 统计待取消订单中的做市订单数量
+            # 统计待取消订单数量（所有类型）
             cancel_stats = self._count_orders_by_type(optimized_cancel_orders)
+            total_cancel_count = sum(cancel_stats.values())
+            
+            # 当前所有订单总数（包括做市、洗盘、对冲等所有类型）
+            total_current_count = sum(order_stats.values())
+            
+            # 净订单数 = 当前总订单 - 待取消订单
+            effective_total_count = total_current_count - total_cancel_count
+            available_slots = max(0, self.max_layer - effective_total_count - anti_pin_reserve)
+            
+            # 用于反针对订单保护的做市订单统计
             cancel_mm_count = cancel_stats['market_making']
-            
-            # 当前做市订单数量（只计算做市订单，不含洗盘/对冲等）
-            current_mm_count = order_stats['market_making']
-            
-            # 优化计算：考虑待取消的做市订单
-            # 净做市订单数 = 当前做市订单 - 待取消做市订单
-            effective_mm_count = current_mm_count - cancel_mm_count
-            available_slots = max(0, self.max_layer - effective_mm_count - anti_pin_reserve)
+            effective_mm_count = order_stats['market_making'] - cancel_mm_count
             
             if len(optimized_add_orders) > available_slots:
                 original_count = len(optimized_add_orders)
                 optimized_add_orders = optimized_add_orders[:available_slots]
                 self.logger.warning(
                     f"🔒 硬性上限保护: 截断做市订单 {original_count} → {len(optimized_add_orders)} "
-                    f"(做市订单={current_mm_count}, 待取消={cancel_mm_count}, "
-                    f"净做市={effective_mm_count}, 上限={self.max_layer}, 可用槽位={available_slots})"
+                    f"(总订单={total_current_count}, 待取消={total_cancel_count}, "
+                    f"净订单={effective_total_count}, 上限={self.max_layer}, 可用槽位={available_slots}, "
+                    f"订单分布: 做市={order_stats['market_making']}, 洗盘={order_stats['wash_trading']}, "
+                    f"反针对={order_stats['anti_pin']}, 对冲={order_stats['hedging']})"
                 )
             else:
                 self.logger.debug(
-                    f"📊 做市订单槽位充足: 当前做市={current_mm_count}, 待取消={cancel_mm_count}, "
-                    f"净做市={effective_mm_count}, 可用={available_slots}, 需添加={len(optimized_add_orders)}"
+                    f"📊 订单槽位充足: 总订单={total_current_count}, 待取消={total_cancel_count}, "
+                    f"净订单={effective_total_count}, 可用={available_slots}, 需添加={len(optimized_add_orders)}"
                 )
 
         # === 1.6 合并再平衡订单 ===
@@ -284,20 +325,20 @@ class OrderExecutor:
                 best_sell, best_buy, anti_pin_config
             )
             
-            # 检查是否有足够槽位添加反针对订单（优化版：只计算做市+反针对订单）
+            # 检查是否有足够槽位添加反针对订单（基于总订单数）
             if self.max_layer is not None:
-                # 净做市订单数 + 待添加做市订单 + 反针对订单
-                total_mm_after_add = effective_mm_count + len(optimized_add_orders) + len(anti_pin_orders)
-                if total_mm_after_add > self.max_layer:
-                    # 计算可用槽位（基于做市订单数）
-                    remaining_slots = max(0, self.max_layer - effective_mm_count - len(optimized_add_orders))
+                # 净总订单数 + 待添加做市订单 + 反针对订单
+                total_after_add = effective_total_count + len(optimized_add_orders) + len(anti_pin_orders)
+                if total_after_add > self.max_layer:
+                    # 计算可用槽位（基于总订单数）
+                    remaining_slots = max(0, self.max_layer - effective_total_count - len(optimized_add_orders))
                     if remaining_slots < len(anti_pin_orders):
                         original_antipin_count = len(anti_pin_orders)
                         anti_pin_orders = anti_pin_orders[:remaining_slots]
                         self.logger.warning(
                             f"🔒 反针对订单截断: {original_antipin_count} → {len(anti_pin_orders)} "
-                            f"(做市订单={effective_mm_count}+{len(optimized_add_orders)}, "
-                            f"总计将达到: {effective_mm_count + len(optimized_add_orders) + len(anti_pin_orders)}/{self.max_layer})"
+                            f"(净订单={effective_total_count}, 待添加做市={len(optimized_add_orders)}, "
+                            f"总计将达到: {effective_total_count + len(optimized_add_orders) + len(anti_pin_orders)}/{self.max_layer})"
                         )
             
             optimized_add_orders.extend(anti_pin_orders)
@@ -916,16 +957,22 @@ class OrderExecutor:
         if buy_diff > 0:
             # 买单不足，需要补充
             for order in target_buy_orders[:buy_diff]:
+                price = float(order["price"])
                 add_orders.append({
                     "symbol": self.symbol,
                     "side": "BUY",
                     "type": "LIMIT",
                     "timeInForce": "GTC",
                     "bizType": "SPOT",
-                    "price": order["price"],
+                    "price": price,
                     "quantity": order.get("quantity", order.get("amount")),
                     "quoteQty": None,
                     "order_purpose": "rebalance",
+                    # 添加optimize_order_matching所需的字段
+                    "amount": order.get("amount", order.get("quantity")),
+                    "direction": "bid",
+                    "min_price": order.get("min_price", price * 0.9999),
+                    "max_price": order.get("max_price", price * 1.0001),
                 })
             self.logger.info(f"🔄 再平衡: 补充 {buy_diff} 个买单")
         elif buy_diff < 0:
@@ -945,16 +992,22 @@ class OrderExecutor:
         if sell_diff > 0:
             # 卖单不足，需要补充
             for order in target_sell_orders[:sell_diff]:
+                price = float(order["price"])
                 add_orders.append({
                     "symbol": self.symbol,
                     "side": "SELL",
                     "type": "LIMIT",
                     "timeInForce": "GTC",
                     "bizType": "SPOT",
-                    "price": order["price"],
+                    "price": price,
                     "quantity": order.get("quantity", order.get("amount")),
                     "quoteQty": None,
                     "order_purpose": "rebalance",
+                    # 添加optimize_order_matching所需的字段
+                    "amount": order.get("amount", order.get("quantity")),
+                    "direction": "ask",
+                    "min_price": order.get("min_price", price * 0.9999),
+                    "max_price": order.get("max_price", price * 1.0001),
                 })
             self.logger.info(f"🔄 再平衡: 补充 {sell_diff} 个卖单")
         elif sell_diff < 0:
@@ -1153,11 +1206,13 @@ class OrderExecutor:
         target_best_buy: float,
         target_best_sell: float,
     ) -> Dict[str, Any]:
-        """修复买卖差价（严格模式：任何偏差都修复）
+        """修复买卖差价（增强版：强制清理偏差订单 + 补充目标价位订单）
         
         修复策略：
         1. 如果实际买一 < 目标买一：补充买单到目标价位
-        2. 如果实际卖一 > 目标卖一：补充卖单到目标价位
+        2. 如果实际卖一 > 目标卖一：
+           a. 撤销所有高于目标卖一的卖单（强制清理）
+           b. 补充卖单到目标价位
         
         Args:
             current_orders: 当前订单列表
@@ -1172,10 +1227,12 @@ class OrderExecutor:
         result = {
             "success": False,
             "orders_added": 0,
+            "orders_cancelled": 0,
             "message": "",
         }
         
         repair_orders = []
+        cancel_orders = []
         
         # 获取精度配置
         price_precision = 6  # 默认值
@@ -1188,7 +1245,7 @@ class OrderExecutor:
         # 计算修复数量（使用最小有效数量）
         min_quantity = 10 ** (-quantity_precision) * 10  # 最小数量的10倍，确保有效
         
-        # 修复买单：实际买一 < 目标买一
+        # === 修复买单：实际买一 < 目标买一 ===
         if actual_bid < target_best_buy:
             repair_price = round(target_best_buy, price_precision)
             repair_qty = round(min_quantity, quantity_precision)
@@ -1207,8 +1264,44 @@ class OrderExecutor:
                 f"(实际买1={actual_bid:.6f} → 目标={target_best_buy:.6f})"
             )
         
-        # 修复卖单：实际卖一 > 目标卖一
+        # === 修复卖单：实际卖一 > 目标卖一（增强版） ===
         if actual_ask > target_best_sell:
+            # 计算偏差程度
+            deviation = (actual_ask - target_best_sell) / target_best_sell
+            self.logger.warning(
+                f"🚨 卖一偏高: 实际={actual_ask:.6f}, 目标={target_best_sell:.6f}, "
+                f"偏差={deviation*100:.2f}%"
+            )
+            
+            # 策略1：找出并撤销所有高于目标卖一的卖单（强制清理）
+            max_allowed_ask = target_best_sell * 1.002  # 允许0.2%容差
+            high_sell_orders = [
+                o for o in current_orders 
+                if o.get("side") == "SELL" 
+                and float(o.get("price", 0)) > max_allowed_ask
+                and o.get("state") != "PARTIALLY_FILLED"  # 不撤销部分成交的订单
+            ]
+            
+            if high_sell_orders:
+                # 按价格降序排序，优先撤销价格最高的
+                high_sell_orders.sort(key=lambda o: float(o.get("price", 0)), reverse=True)
+                
+                # 撤销偏高的卖单（最多撤销10个，避免一次撤销太多）
+                orders_to_cancel = high_sell_orders[:10]
+                cancel_orders.extend(orders_to_cancel)
+                
+                self.logger.info(
+                    f"🧹 识别到 {len(high_sell_orders)} 个偏高卖单，将撤销 {len(orders_to_cancel)} 个 "
+                    f"(价格 > {max_allowed_ask:.6f})"
+                )
+                
+                for order in orders_to_cancel[:3]:  # 只打印前3个
+                    self.logger.debug(
+                        f"   - 撤销: {order.get('orderId')} @ {order.get('price')} "
+                        f"数量={order.get('origQty')}"
+                    )
+            
+            # 策略2：补充卖单到目标价位
             repair_price = round(target_best_sell, price_precision)
             repair_qty = round(min_quantity, quantity_precision)
             
@@ -1226,10 +1319,31 @@ class OrderExecutor:
                 f"(实际卖1={actual_ask:.6f} → 目标={target_best_sell:.6f})"
             )
         
-        # 执行修复订单
+        # === 执行撤销订单 ===
+        if cancel_orders:
+            try:
+                cancelled_count = 0
+                for order in cancel_orders:
+                    try:
+                        self.order_manager.cancel_order(order)
+                        cancelled_count += 1
+                    except Exception as e:
+                        self.logger.error(f"撤销订单失败: {order.get('orderId')} - {e}")
+                
+                result["orders_cancelled"] = cancelled_count
+                self.logger.info(f"✅ 成功撤销 {cancelled_count}/{len(cancel_orders)} 个偏高订单")
+                
+            except Exception as e:
+                self.logger.error(f"批量撤销异常: {e}")
+        
+        # === 执行修复订单 ===
         if not repair_orders:
-            result["message"] = "无需修复"
-            result["success"] = True
+            if cancel_orders:
+                result["message"] = f"已撤销 {result['orders_cancelled']} 个偏高订单"
+                result["success"] = True
+            else:
+                result["message"] = "无需修复"
+                result["success"] = True
             return result
         
         try:
@@ -1237,11 +1351,31 @@ class OrderExecutor:
             res = self.order_manager.client.batch_order(repair_orders)
             
             if res:
-                success_count = sum(1 for r in res if r.get("orderId"))
+                # batch_order 返回格式: {'batchId': '...', 'items': [{'orderId': '...', 'rejected': False}, ...]}
+                items = res.get("items", []) if isinstance(res, dict) else res
+                
+                # 统计成功订单数量
+                success_count = 0
+                for item in items:
+                    if isinstance(item, dict):
+                        # 标准格式: {'orderId': '...', 'rejected': False}
+                        if item.get("orderId") and not item.get("rejected", False):
+                            success_count += 1
+                    elif isinstance(item, str) and item.isdigit():
+                        # 兼容旧格式：订单ID字符串
+                        success_count += 1
+                
                 result["success"] = success_count > 0
                 result["orders_added"] = success_count
-                result["message"] = f"修复完成: {success_count}/{len(repair_orders)} 单成功"
+                result["message"] = (
+                    f"修复完成: 添加 {success_count}/{len(repair_orders)} 单, "
+                    f"撤销 {result['orders_cancelled']} 单"
+                )
                 self.logger.info(f"✅ {result['message']}")
+                
+                # 调试日志：记录返回格式
+                if success_count != len(repair_orders):
+                    self.logger.debug(f"修复订单返回详情: {res}")
             else:
                 result["message"] = "修复下单失败"
                 self.logger.error(f"❌ {result['message']}")
@@ -1249,5 +1383,517 @@ class OrderExecutor:
         except Exception as e:
             result["message"] = f"修复异常: {e}"
             self.logger.error(f"❌ {result['message']}")
+        
+        return result
+
+    # ==================== 分层订单检查与调整 ====================
+
+    def _analyze_layer_orders(
+        self, orders: List[Dict[str, Any]], nav: float
+    ) -> Dict[str, Dict[str, Any]]:
+        """分析各层订单情况
+        
+        将订单按距离NAV的百分比分为三层:
+        - near: 近盘口 (0-0.5%)
+        - mid: 中盘口 (0.5%-2%)
+        - far: 远盘口 (2%-10%)
+        
+        Args:
+            orders: 当前订单列表
+            nav: 当前净值
+            
+        Returns:
+            Dict: 各层统计数据
+        """
+        layers = {
+            "near": {"range": (0, 0.005), "orders": [], "buy": [], "sell": []},
+            "mid": {"range": (0.005, 0.02), "orders": [], "buy": [], "sell": []},
+            "far": {"range": (0.02, 0.10), "orders": [], "buy": [], "sell": []},
+        }
+
+        for order in orders:
+            price = float(order.get("price", 0))
+            if price <= 0 or nav <= 0:
+                continue
+            
+            distance = abs(price - nav) / nav
+            side = order.get("side", "")
+
+            for layer_name, layer_data in layers.items():
+                min_d, max_d = layer_data["range"]
+                if min_d <= distance < max_d:
+                    layer_data["orders"].append(order)
+                    if side == "BUY":
+                        layer_data["buy"].append(order)
+                    elif side == "SELL":
+                        layer_data["sell"].append(order)
+                    break
+
+        # 计算统计数据
+        for layer_name, data in layers.items():
+            data["buy_count"] = len(data["buy"])
+            data["sell_count"] = len(data["sell"])
+            data["buy_depth"] = sum(
+                float(o.get("price", 0)) * float(o.get("quantity", 0)) 
+                for o in data["buy"]
+            )
+            data["sell_depth"] = sum(
+                float(o.get("price", 0)) * float(o.get("quantity", 0)) 
+                for o in data["sell"]
+            )
+            data["imbalance"] = self._calc_layer_imbalance(
+                data["buy_count"], data["sell_count"]
+            )
+
+            # 计算档位密度（平均价格间隔比例）
+            if len(data["buy"]) > 1:
+                buy_prices = sorted(
+                    [float(o.get("price", 0)) for o in data["buy"]], 
+                    reverse=True
+                )
+                data["buy_density"] = self._calc_price_density(buy_prices, nav)
+            else:
+                data["buy_density"] = 0
+                
+            if len(data["sell"]) > 1:
+                sell_prices = sorted(
+                    [float(o.get("price", 0)) for o in data["sell"]]
+                )
+                data["sell_density"] = self._calc_price_density(sell_prices, nav)
+            else:
+                data["sell_density"] = 0
+
+        return layers
+
+    def _calc_layer_imbalance(self, buy_count: int, sell_count: int) -> float:
+        """计算买卖不平衡度"""
+        total = buy_count + sell_count
+        if total == 0:
+            return 0
+        return abs(buy_count - sell_count) / total
+
+    def _calc_price_density(self, prices: List[float], nav: float) -> float:
+        """计算平均档位密度（相邻价格间隔占NAV的比例）
+        
+        返回值越小表示档位越紧密，越大表示档位越稀疏
+        """
+        if len(prices) < 2 or nav <= 0:
+            return 0
+        
+        total_gap = 0
+        for i in range(1, len(prices)):
+            gap = abs(prices[i] - prices[i-1]) / nav
+            total_gap += gap
+        
+        return total_gap / (len(prices) - 1)
+
+    def _print_layer_stats(self, layer_analysis: Dict[str, Dict[str, Any]]) -> None:
+        """打印分层订单统计"""
+        self.logger.info("📊 ============ 分层订单统计 ============")
+
+        layer_names = {"near": "近盘口", "mid": "中盘口", "far": "远盘口"}
+        
+        for layer_name in ["near", "mid", "far"]:
+            data = layer_analysis[layer_name]
+            total = data["buy_count"] + data["sell_count"]
+            
+            if total == 0:
+                status = "❌ 无订单"
+            elif data["imbalance"] > 0.4:
+                status = f"🚨 严重不平衡{data['imbalance']:.0%}"
+            elif data["imbalance"] > 0.3:
+                status = f"⚠️ 不平衡{data['imbalance']:.0%}"
+            else:
+                status = "✅"
+
+            layer_cn = layer_names[layer_name]
+            self.logger.info(
+                f"📊 {layer_cn}: {status} "
+                f"BUY={data['buy_count']}({data['buy_depth']:.0f}U) "
+                f"SELL={data['sell_count']}({data['sell_depth']:.0f}U)"
+            )
+
+        self.logger.info("📊 ==========================================")
+
+    def _filter_target_by_layer(
+        self, 
+        target_orders: List[Dict[str, Any]], 
+        layer_name: str, 
+        nav: float
+    ) -> List[Dict[str, Any]]:
+        """筛选属于指定层级的目标订单"""
+        layer_ranges = {
+            "near": (0, 0.005),
+            "mid": (0.005, 0.02),
+            "far": (0.02, 0.10),
+        }
+        
+        min_d, max_d = layer_ranges.get(layer_name, (0, 1))
+        filtered = []
+        
+        for order in target_orders:
+            price = float(order.get("price", 0))
+            if price <= 0 or nav <= 0:
+                continue
+            distance = abs(price - nav) / nav
+            if min_d <= distance < max_d:
+                filtered.append(order)
+        
+        return filtered
+
+    def _adjust_layer(
+        self,
+        layer_name: str,
+        layer_data: Dict[str, Any],
+        target_orders: List[Dict[str, Any]],
+        nav: float,
+        config: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """调整单层订单，确保符合该层目标
+        
+        Args:
+            layer_name: 层级名称 (near/mid/far)
+            layer_data: 该层当前订单统计
+            target_orders: 该层目标订单
+            nav: 当前净值
+            config: 配置参数
+            
+        Returns:
+            Tuple[需要添加的订单, 需要取消的订单]
+        """
+        if layer_name == "near":
+            return self._adjust_near_book(layer_data, target_orders, nav, config)
+        elif layer_name == "mid":
+            return self._adjust_mid_book(layer_data, target_orders, nav, config)
+        elif layer_name == "far":
+            return self._adjust_far_book(layer_data, target_orders, nav, config)
+        else:
+            return [], []
+
+    def _adjust_near_book(
+        self,
+        layer_data: Dict[str, Any],
+        target_orders: List[Dict[str, Any]],
+        nav: float,
+        config: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """近盘口调整：买卖一 + 紧密档位 + 合理深度
+        
+        近盘口是最重要的区域，需要确保：
+        1. 买卖一存在且价格合理
+        2. 价差在配置范围内
+        3. 档位紧密（间隔小）
+        4. 深度足够
+        5. 买卖平衡
+        """
+        add_orders = []
+        cancel_orders = []
+        
+        bid_ask_spread = config.get("bid_ask_spread", 0.008)
+        near_min_depth = config.get("near_min_depth", 100)
+        max_imbalance = config.get("near_max_imbalance", 0.3)
+        max_density = config.get("near_max_density", 0.002)  # 最大间隔0.2%
+
+        # 1. 检查买卖一
+        best_buy = max(
+            [float(o.get("price", 0)) for o in layer_data["buy"]], 
+            default=0
+        )
+        best_sell = min(
+            [float(o.get("price", float('inf'))) for o in layer_data["sell"]], 
+            default=float('inf')
+        )
+
+        target_buy1 = nav * (1 - bid_ask_spread / 2)
+        target_sell1 = nav * (1 + bid_ask_spread / 2)
+
+        # 买一检查
+        if not best_buy or abs(best_buy - target_buy1) / nav > bid_ask_spread:
+            self.logger.warning(
+                f"🔧 近盘口: 买一异常 实际={best_buy:.6f} 目标={target_buy1:.6f}"
+            )
+            add_orders.append(self._create_layer_order("BUY", target_buy1, nav, config))
+
+        # 卖一检查
+        if best_sell == float('inf') or abs(best_sell - target_sell1) / nav > bid_ask_spread:
+            self.logger.warning(
+                f"🔧 近盘口: 卖一异常 实际={best_sell:.6f} 目标={target_sell1:.6f}"
+            )
+            add_orders.append(self._create_layer_order("SELL", target_sell1, nav, config))
+
+        # 2. 检查价差
+        if best_buy > 0 and best_sell < float('inf'):
+            spread = (best_sell - best_buy) / nav
+            if spread > bid_ask_spread * 1.5:
+                self.logger.warning(
+                    f"🔧 近盘口: 价差过大 {spread:.2%} > 目标{bid_ask_spread:.2%}"
+                )
+                # 补充中间价格订单收窄价差
+                mid_price = (best_buy + best_sell) / 2
+                add_orders.append(self._create_layer_order("BUY", mid_price * 0.999, nav, config))
+                add_orders.append(self._create_layer_order("SELL", mid_price * 1.001, nav, config))
+
+        # 3. 检查档位密度（近盘口要求紧密）
+        if layer_data.get("buy_density", 0) > max_density and layer_data["buy_count"] < 10:
+            self.logger.info("📊 近盘口: 买盘档位稀疏，补充订单")
+            near_buy_targets = [
+                o for o in target_orders 
+                if o.get("direction") == "bid"
+            ]
+            for order in near_buy_targets[:3]:
+                add_orders.append({
+                    "symbol": self.symbol,
+                    "side": "BUY",
+                    "type": "LIMIT",
+                    "timeInForce": "GTC",
+                    "bizType": "SPOT",
+                    "price": order.get("price"),
+                    "quantity": order.get("quantity", order.get("amount")),
+                    "quoteQty": None,
+                    "order_purpose": "layer_adjust",
+                })
+
+        if layer_data.get("sell_density", 0) > max_density and layer_data["sell_count"] < 10:
+            self.logger.info("📊 近盘口: 卖盘档位稀疏，补充订单")
+            near_sell_targets = [
+                o for o in target_orders 
+                if o.get("direction") == "ask"
+            ]
+            for order in near_sell_targets[:3]:
+                add_orders.append({
+                    "symbol": self.symbol,
+                    "side": "SELL",
+                    "type": "LIMIT",
+                    "timeInForce": "GTC",
+                    "bizType": "SPOT",
+                    "price": order.get("price"),
+                    "quantity": order.get("quantity", order.get("amount")),
+                    "quoteQty": None,
+                    "order_purpose": "layer_adjust",
+                })
+
+        # 4. 检查深度
+        if layer_data["buy_depth"] < near_min_depth:
+            self.logger.warning(
+                f"🔧 近盘口: 买盘深度不足 {layer_data['buy_depth']:.0f}U < {near_min_depth}U"
+            )
+            # 从目标订单补充
+            for order in [o for o in target_orders if o.get("direction") == "bid"][:2]:
+                add_orders.append({
+                    "symbol": self.symbol,
+                    "side": "BUY",
+                    "type": "LIMIT",
+                    "timeInForce": "GTC",
+                    "bizType": "SPOT",
+                    "price": order.get("price"),
+                    "quantity": order.get("quantity", order.get("amount")),
+                    "quoteQty": None,
+                    "order_purpose": "layer_adjust",
+                })
+
+        if layer_data["sell_depth"] < near_min_depth:
+            self.logger.warning(
+                f"🔧 近盘口: 卖盘深度不足 {layer_data['sell_depth']:.0f}U < {near_min_depth}U"
+            )
+            for order in [o for o in target_orders if o.get("direction") == "ask"][:2]:
+                add_orders.append({
+                    "symbol": self.symbol,
+                    "side": "SELL",
+                    "type": "LIMIT",
+                    "timeInForce": "GTC",
+                    "bizType": "SPOT",
+                    "price": order.get("price"),
+                    "quantity": order.get("quantity", order.get("amount")),
+                    "quoteQty": None,
+                    "order_purpose": "layer_adjust",
+                })
+
+        # 5. 检查买卖平衡
+        if layer_data["imbalance"] > max_imbalance:
+            self.logger.warning(
+                f"🔧 近盘口: 不平衡 BUY={layer_data['buy_count']} SELL={layer_data['sell_count']}"
+            )
+            # 补充少的一方
+            if layer_data["buy_count"] < layer_data["sell_count"]:
+                deficit = (layer_data["sell_count"] - layer_data["buy_count"]) // 2
+                for i in range(min(deficit, 5)):
+                    price = target_buy1 * (1 - 0.001 * (i + 1))
+                    add_orders.append(self._create_layer_order("BUY", price, nav, config))
+            else:
+                deficit = (layer_data["buy_count"] - layer_data["sell_count"]) // 2
+                for i in range(min(deficit, 5)):
+                    price = target_sell1 * (1 + 0.001 * (i + 1))
+                    add_orders.append(self._create_layer_order("SELL", price, nav, config))
+
+        return add_orders, cancel_orders
+
+    def _adjust_mid_book(
+        self,
+        layer_data: Dict[str, Any],
+        target_orders: List[Dict[str, Any]],
+        nav: float,
+        config: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """中盘口调整：合理深度 + 分散档位"""
+        add_orders = []
+        cancel_orders = []
+
+        mid_min_depth = config.get("mid_min_depth", 200)
+        max_imbalance = config.get("mid_max_imbalance", 0.4)
+
+        # 1. 检查深度是否合理
+        if layer_data["buy_depth"] < mid_min_depth:
+            self.logger.info("📊 中盘口: 买盘深度不足，补充订单")
+            mid_buy_targets = [
+                o for o in target_orders 
+                if o.get("direction") == "bid"
+            ]
+            for order in mid_buy_targets[:5]:
+                add_orders.append({
+                    "symbol": self.symbol,
+                    "side": "BUY",
+                    "type": "LIMIT",
+                    "timeInForce": "GTC",
+                    "bizType": "SPOT",
+                    "price": order.get("price"),
+                    "quantity": order.get("quantity", order.get("amount")),
+                    "quoteQty": None,
+                    "order_purpose": "layer_adjust",
+                })
+
+        if layer_data["sell_depth"] < mid_min_depth:
+            self.logger.info("📊 中盘口: 卖盘深度不足，补充订单")
+            mid_sell_targets = [
+                o for o in target_orders 
+                if o.get("direction") == "ask"
+            ]
+            for order in mid_sell_targets[:5]:
+                add_orders.append({
+                    "symbol": self.symbol,
+                    "side": "SELL",
+                    "type": "LIMIT",
+                    "timeInForce": "GTC",
+                    "bizType": "SPOT",
+                    "price": order.get("price"),
+                    "quantity": order.get("quantity", order.get("amount")),
+                    "quoteQty": None,
+                    "order_purpose": "layer_adjust",
+                })
+
+        # 2. 检查买卖平衡（中盘口容忍度更高）
+        if layer_data["imbalance"] > max_imbalance:
+            self.logger.warning(
+                f"🔧 中盘口: 不平衡 BUY={layer_data['buy_count']} SELL={layer_data['sell_count']}"
+            )
+            # 中盘口只记录告警，不主动补单（避免订单过多）
+
+        return add_orders, cancel_orders
+
+    def _adjust_far_book(
+        self,
+        layer_data: Dict[str, Any],
+        target_orders: List[Dict[str, Any]],
+        nav: float,
+        config: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """远盘口调整：数量和深度合理"""
+        add_orders = []
+        cancel_orders = []
+
+        far_min_count = config.get("far_min_count", 25)  # 每方向至少25单
+        max_imbalance = config.get("far_max_imbalance", 0.5)
+
+        # 1. 检查数量是否合理
+        if layer_data["buy_count"] < far_min_count:
+            self.logger.info(
+                f"📊 远盘口: 买单数量不足 {layer_data['buy_count']} < {far_min_count}"
+            )
+            far_buy_targets = [
+                o for o in target_orders 
+                if o.get("direction") == "bid"
+            ]
+            for order in far_buy_targets[:10]:
+                add_orders.append({
+                    "symbol": self.symbol,
+                    "side": "BUY",
+                    "type": "LIMIT",
+                    "timeInForce": "GTC",
+                    "bizType": "SPOT",
+                    "price": order.get("price"),
+                    "quantity": order.get("quantity", order.get("amount")),
+                    "quoteQty": None,
+                    "order_purpose": "layer_adjust",
+                })
+
+        if layer_data["sell_count"] < far_min_count:
+            self.logger.info(
+                f"📊 远盘口: 卖单数量不足 {layer_data['sell_count']} < {far_min_count}"
+            )
+            far_sell_targets = [
+                o for o in target_orders 
+                if o.get("direction") == "ask"
+            ]
+            for order in far_sell_targets[:10]:
+                add_orders.append({
+                    "symbol": self.symbol,
+                    "side": "SELL",
+                    "type": "LIMIT",
+                    "timeInForce": "GTC",
+                    "bizType": "SPOT",
+                    "price": order.get("price"),
+                    "quantity": order.get("quantity", order.get("amount")),
+                    "quoteQty": None,
+                    "order_purpose": "layer_adjust",
+                })
+
+        # 2. 检查买卖平衡（远盘口容忍度最高）
+        if layer_data["imbalance"] > max_imbalance:
+            self.logger.warning(
+                f"🔧 远盘口: 严重不平衡 BUY={layer_data['buy_count']} SELL={layer_data['sell_count']}"
+            )
+
+        return add_orders, cancel_orders
+
+    def _create_layer_order(
+        self, 
+        side: str, 
+        price: float, 
+        nav: float,
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """创建分层调整订单"""
+        # 获取精度配置
+        price_precision = config.get("precision", 6)
+        quantity_precision = config.get("prec_amount", 4)
+        min_order_amount = config.get("min_order_amount", 10)  # 最小订单金额(USDT)
+        
+        # 计算数量
+        quantity = round(min_order_amount / price, quantity_precision)
+        
+        return {
+            "symbol": self.symbol,
+            "side": side,
+            "type": "LIMIT",
+            "timeInForce": "GTC",
+            "bizType": "SPOT",
+            "price": round(price, price_precision),
+            "quantity": quantity,
+            "quoteQty": None,
+            "order_purpose": "layer_adjust",
+        }
+
+    def _dedupe_orders(self, orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """订单去重（基于价格和方向）"""
+        seen = set()
+        result = []
+        
+        for order in orders:
+            price = order.get("price")
+            side = order.get("side")
+            key = (price, side)
+            
+            if key not in seen:
+                seen.add(key)
+                result.append(order)
         
         return result
