@@ -846,6 +846,17 @@ def main():
         )
     if order_manager.risk_actions(risk_controller.risk_level, symbol=config["symbol"]):
         market_maker = MarketMaker(order_manager, symbol_config_manager=symbol_config_manager)
+        
+        # ✅ 初始化 Maintainer（如果启用）
+        maintainer_config = config.get("orderbook_maintainer", {})
+        if maintainer_config.get("enabled", False):
+            market_maker.init_maintainer(
+                config=maintainer_config,
+                symbol=config["symbol"],
+                strategy_name=config.get("strategy_name", "unknown"),
+            )
+            logging.info(f"✅ Maintainer 初始化完成: {config['symbol']}")
+        
         wash_controller = WashController(order_manager, market_maker, symbol_config_manager=symbol_config_manager)
         
         # ✅ 初始化洗盘订单追踪器（检测和处理孤儿订单）

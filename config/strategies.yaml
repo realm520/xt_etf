@@ -44,6 +44,14 @@ defaults:
   anti_pin_rate: 0.2
   bid_ask_spread: 0.008            # 默认 0.8% 价差
 
+  orderbook_maintainer:
+    enabled: true
+    spread: 0.008
+    max_distance: 0.10
+    total_budget: 10000
+    min_price_change: 0.002
+    max_operations_per_cycle: 30
+
   # 分层订单调整配置
   layer_adjustment:
     enabled: true                    # 是否启用分层调整
@@ -112,7 +120,21 @@ defaults:
     force_repair: true             # 超过偏差时强制修复
     check_on_every_update: true    # 每次更新都检查
 
-  # 订单簿算法配置
+  # ========================================
+  # Maintainer 订单簿维护系统配置（新）
+  # ========================================
+  orderbook_maintainer:
+    enabled: false                 # 默认禁用，各策略按需启用
+    spread: 0.008                  # 买卖价差
+    max_distance: 0.10             # 最大距离（相对于NAV）
+    total_budget: 10000            # 总预算 (USDT)
+    min_order_value: 10            # 最小订单金额
+    min_price_change: 0.002        # 最小价格变化触发更新
+    max_operations_per_cycle: 30   # 每周期最大操作数
+    max_orders: 200                # 最大订单数
+    order_overflow_threshold: 0.9  # 订单溢出阈值（触发先删后加）
+
+  # 订单簿算法配置（旧路径，与 Maintainer 互斥）
   orderbook_algorithm: "natural"
   orderbook_config:
     total_budget: 10000.0
