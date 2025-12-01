@@ -105,9 +105,8 @@ class OrderWebSocketClient:
         self._loop = None
         self._thread = None
 
-        # 订单状态缓存（线程安全）
-        self._order_cache: Dict[str, Dict] = {}
-        self._cache_lock = threading.Lock()
+        # Phase 5.2: 移除订单状态缓存，使用 OrderManager 统一管理
+        # self._order_cache 已废弃，订单状态由 OrderManager 维护
 
         # 统计信息
         self._stats = {
@@ -425,12 +424,10 @@ class OrderWebSocketClient:
                 f"已成交:{order_data.get('eq')}/{order_data.get('oq')}"
             )
 
-            # 更新订单缓存
-            with self._cache_lock:
-                self._order_cache[order_id] = order_data
-                if state:
-                    self._stats['order_states'][state] += 1
-
+            # Phase 5.2: 移除订单缓存更新（由 OrderManager 统一管理）
+            # 只更新统计信息
+            if state:
+                self._stats['order_states'][state] += 1
             self._stats['order_updates'] += 1
 
             # 调用回调函数（传递原始短字段名数据）
@@ -518,32 +515,37 @@ class OrderWebSocketClient:
 
     def get_order_status(self, order_id: str) -> Optional[Dict[str, Any]]:
         """
-        获取订单当前状态（从缓存）
+        [已废弃] 获取订单当前状态
+
+        Phase 5.2: 此方法已废弃，请使用 OrderManager.open_orders.get(order_id)
 
         Args:
             order_id: 订单ID
 
         Returns:
-            订单数据字典，如果不存在返回None
+            None（缓存已移除）
         """
-        with self._cache_lock:
-            return self._order_cache.get(order_id)
+        logger.warning("get_order_status() 已废弃，请使用 OrderManager.open_orders.get(order_id)")
+        return None
 
     def get_all_cached_orders(self) -> Dict[str, Dict[str, Any]]:
         """
-        获取所有缓存的订单
+        [已废弃] 获取所有缓存的订单
+
+        Phase 5.2: 此方法已废弃，请使用 OrderManager.get_open_orders_list()
 
         Returns:
-            订单ID -> 订单数据的字典
+            空字典（缓存已移除）
         """
-        with self._cache_lock:
-            return self._order_cache.copy()
+        logger.warning("get_all_cached_orders() 已废弃，请使用 OrderManager.get_open_orders_list()")
+        return {}
 
     def clear_order_cache(self):
-        """清空订单缓存"""
-        with self._cache_lock:
-            self._order_cache.clear()
-            logger.info("订单缓存已清空")
+        """[已废弃] 清空订单缓存
+
+        Phase 5.2: 此方法已废弃，订单状态由 OrderManager 管理
+        """
+        logger.warning("clear_order_cache() 已废弃，订单状态由 OrderManager 管理")
 
     def is_connected(self) -> bool:
         """检查WebSocket是否已连接"""
@@ -554,7 +556,7 @@ class OrderWebSocketClient:
         stats = self._stats.copy()
         stats['connected'] = self._connected
         stats['reconnect_count'] = self._reconnect_count
-        stats['cached_orders'] = len(self._order_cache)
+        # Phase 5.2: 移除 cached_orders（由 OrderManager 管理）
         return stats
 
     def __enter__(self):

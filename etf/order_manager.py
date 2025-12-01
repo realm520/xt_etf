@@ -8,8 +8,19 @@ from datetime import datetime, timezone, timedelta
 from copy import deepcopy
 import asyncio
 import threading
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Set
 from functools import wraps
+from sortedcontainers import SortedDict  # 用于订单簿价格索引
+
+# 订单类型前缀常量
+ORDER_TYPE_PREFIXES = {
+    "mm": "market_making",
+    "antipin": "anti_pin",
+    "wash": "wash_trading",
+    "hedge": "hedging",
+    "rebal": "rebalance",
+    "layer_adjust": "layer_adjustment",
+}
 from etf.alert import send_alert, AlertLevel
 from etf.utils.common import get_mid_price
 from etf.utils.order_errors import (
@@ -32,8 +43,8 @@ except ImportError:
 # 导入资金检查器
 from etf.balance_checker import BalanceChecker, BalanceStatus
 
-# 导入订单状态管理器
-from etf.order_state_manager import OrderStateManager
+# Phase 5.1: 订单状态管理已内置到 OrderManager，不再需要 OrderStateManager
+# from etf.order_state_manager import OrderStateManager  # 已废弃
 
 
 def retry_on_failure(max_retries: int = 3, delay: float = 1.0, backoff: float = 2.0):
@@ -131,14 +142,34 @@ class OrderManager:
         self.init_amount = None
 
 
-        # orders
-        self.open_orders = {}
+        # orders - 主订单存储 (保持 Dict 格式，兼容现有代码)
+        self.open_orders: Dict[str, Dict] = {}
         self.trade_orders = {}
         self.partially_filled_orders = {}
         self.sent_orders = {}
 
-        self.canceled_orders = []
-        self.filled_orders = []
+        self.canceled_orders: List[Dict] = []
+        self.filled_orders: List[Dict] = []
+
+        # ========== 订单簿索引结构 (Phase 1 新增) ==========
+        # 类型索引 (加速按类型查询)
+        self._orders_by_type: Dict[str, Set[str]] = {
+            "mm": set(),
+            "antipin": set(),
+            "wash": set(),
+            "hedge": set(),
+            "rebal": set(),
+            "layer_adjust": set(),
+            "unknown": set(),
+        }
+
+        # 价格索引 (加速最优价格查询)
+        self._bids: SortedDict = SortedDict()  # price -> [order_ids], 价格升序
+        self._asks: SortedDict = SortedDict()  # price -> [order_ids], 价格升序
+
+        # 线程锁 (保护订单簿并发访问，WebSocket 在独立线程)
+        self._orderbook_lock = threading.RLock()
+        # ====================================================
 
         # trade
         self.trading_history = []
@@ -161,6 +192,9 @@ class OrderManager:
             self._init_recorder_loop()
         else:
             self.order_recorder = None
+        
+        # 异步调度器（用于在同步上下文中调度异步任务）
+        self.async_scheduler = None
 
         # 添加错误统计和健康检查
         self.api_error_count = 0
@@ -194,16 +228,514 @@ class OrderManager:
         self.use_order_websocket = False
         self._init_order_websocket()
 
-        # ✅ 初始化订单状态管理器（统一订单状态变更入口）
-        self.state_manager = OrderStateManager(
-            open_orders=self.open_orders,
-            filled_orders=self.filled_orders,
-            canceled_orders=self.canceled_orders,
-            order_recorder=self.order_recorder,
-            async_scheduler=self._schedule_async,
-            logger=logging.getLogger(f"{__name__}.StateManager")
-        )
-        logging.info("OrderStateManager已初始化，成交记录已启用")
+        # ✅ Phase 5.1: 移除 OrderStateManager 依赖
+        # 订单状态管理已内置到 OrderManager 中：
+        # - _update_orderbook(): 更新订单状态和索引
+        # - _trigger_order_persistence(): 触发持久化
+        # - _handle_trade_event(): 处理成交事件
+        # self.state_manager 已废弃，保留属性以兼容旧代码
+        self.state_manager = None  # 已废弃，使用内部方法替代
+        logging.info("订单状态管理已内置到OrderManager（已移除OrderStateManager依赖）")
+
+    # ========== Phase 2: 内部订单簿操作方法（带锁保护）==========
+
+    def _parse_order_type(self, client_order_id: str) -> str:
+        """从 clientOrderId 解析订单类型
+
+        Args:
+            client_order_id: 订单的客户端ID，格式如 mm_xxx, wash_xxx 等
+
+        Returns:
+            订单类型字符串，如 "mm", "wash", "hedge" 等，未知类型返回 "unknown"
+        """
+        if not client_order_id:
+            return "unknown"
+        for prefix in ["mm_", "antipin_", "wash_", "hedge_", "rebal_", "layer_adjust_"]:
+            if client_order_id.startswith(prefix):
+                return prefix.rstrip("_")
+        return "unknown"
+
+    def _add_to_orderbook(self, order: Dict) -> None:
+        """添加订单到内部订单簿（线程安全）
+
+        同时更新:
+        1. open_orders 主存储
+        2. _orders_by_type 类型索引
+        3. _bids/_asks 价格索引
+
+        Args:
+            order: 订单字典，必须包含 orderId, clientOrderId, price, side
+        """
+        with self._orderbook_lock:
+            order_id = order.get("orderId")
+            if not order_id:
+                logging.warning("_add_to_orderbook: 订单缺少 orderId，跳过")
+                return
+
+            # 如果已存在，先移除旧的
+            if order_id in self.open_orders:
+                self._remove_from_orderbook_unlocked(order_id)
+
+            # 1. 添加到主存储
+            self.open_orders[order_id] = order
+
+            # 2. 更新类型索引
+            order_type = self._parse_order_type(order.get("clientOrderId", ""))
+            if order_type in self._orders_by_type:
+                self._orders_by_type[order_type].add(order_id)
+            else:
+                self._orders_by_type["unknown"].add(order_id)
+
+            # 3. 更新价格索引
+            try:
+                price = float(order.get("price", 0))
+                side = order.get("side", "")
+                if price > 0 and side:
+                    price_index = self._bids if side == "BUY" else self._asks
+                    if price not in price_index:
+                        price_index[price] = []
+                    if order_id not in price_index[price]:
+                        price_index[price].append(order_id)
+            except (ValueError, TypeError) as e:
+                logging.warning(f"_add_to_orderbook: 价格解析失败 - {e}")
+
+    def _remove_from_orderbook_unlocked(self, order_id: str) -> Optional[Dict]:
+        """从内部订单簿移除订单（不加锁，供内部调用）
+
+        注意: 此方法不加锁，调用方需要在持有 _orderbook_lock 时调用
+
+        Args:
+            order_id: 要移除的订单ID
+
+        Returns:
+            被移除的订单字典，如果不存在返回 None
+        """
+        if order_id not in self.open_orders:
+            return None
+
+        order = self.open_orders.pop(order_id)
+
+        # 1. 从类型索引移除
+        order_type = self._parse_order_type(order.get("clientOrderId", ""))
+        if order_type in self._orders_by_type:
+            self._orders_by_type[order_type].discard(order_id)
+        self._orders_by_type["unknown"].discard(order_id)  # 以防万一
+
+        # 2. 从价格索引移除
+        try:
+            price = float(order.get("price", 0))
+            side = order.get("side", "")
+            if price > 0 and side:
+                price_index = self._bids if side == "BUY" else self._asks
+                if price in price_index:
+                    if order_id in price_index[price]:
+                        price_index[price].remove(order_id)
+                    if not price_index[price]:
+                        del price_index[price]
+        except (ValueError, TypeError, KeyError):
+            pass  # 忽略价格索引清理错误
+
+        return order
+
+    def _remove_from_orderbook(self, order_id: str) -> Optional[Dict]:
+        """从内部订单簿移除订单（线程安全）
+
+        Args:
+            order_id: 要移除的订单ID
+
+        Returns:
+            被移除的订单字典，如果不存在返回 None
+        """
+        with self._orderbook_lock:
+            return self._remove_from_orderbook_unlocked(order_id)
+
+    def _update_orderbook(self, order_id: str, new_state: str,
+                          executed_qty: float = None,
+                          order_data: Dict = None) -> bool:
+        """更新订单簿中的订单状态（线程安全）
+
+        处理逻辑:
+        1. 如果订单存在，更新其状态
+        2. 如果订单是终态（FILLED/CANCELED等），从订单簿移除并加入历史
+        3. 如果是新订单且状态为活跃，添加到订单簿
+
+        Args:
+            order_id: 订单ID
+            new_state: 新状态 (NEW, PARTIALLY_FILLED, FILLED, CANCELED, etc.)
+            executed_qty: 已执行数量（可选）
+            order_data: 订单完整数据（用于新订单添加）
+
+        Returns:
+            True 如果更新成功，False 如果订单不存在且无法添加
+        """
+        with self._orderbook_lock:
+            if order_id not in self.open_orders:
+                # 如果是新订单且状态为活跃，添加到订单簿
+                if new_state in ['NEW', 'PARTIALLY_FILLED'] and order_data:
+                    self.open_orders[order_id] = order_data
+                    # 更新类型索引
+                    order_type = self._parse_order_type(order_data.get("clientOrderId", ""))
+                    if order_type in self._orders_by_type:
+                        self._orders_by_type[order_type].add(order_id)
+                    else:
+                        self._orders_by_type["unknown"].add(order_id)
+                    # 更新价格索引
+                    try:
+                        price = float(order_data.get("price", 0))
+                        side = order_data.get("side", "")
+                        if price > 0 and side:
+                            price_index = self._bids if side == "BUY" else self._asks
+                            if price not in price_index:
+                                price_index[price] = []
+                            if order_id not in price_index[price]:
+                                price_index[price].append(order_id)
+                    except (ValueError, TypeError):
+                        pass
+                    return True
+                return False
+
+            order = self.open_orders[order_id]
+            order["state"] = new_state
+            order["update_time"] = time.time()
+
+            if executed_qty is not None:
+                order["executedQty"] = executed_qty
+
+            # 终态订单移到历史
+            if new_state in ['FILLED', 'CANCELED', 'REJECTED', 'EXPIRED']:
+                removed = self._remove_from_orderbook_unlocked(order_id)
+                if removed:
+                    removed["state"] = new_state
+                    if new_state == 'FILLED':
+                        self.filled_orders.append(removed)
+                    else:
+                        self.canceled_orders.append(removed)
+
+            return True
+
+    def _rebuild_orderbook_indexes(self) -> None:
+        """重建订单簿索引（在 reset_open_orders 后调用）
+
+        清空并重建类型索引和价格索引
+        """
+        with self._orderbook_lock:
+            # 清空索引
+            for order_set in self._orders_by_type.values():
+                order_set.clear()
+            self._bids.clear()
+            self._asks.clear()
+
+            # 重建索引
+            for order_id, order in self.open_orders.items():
+                # 类型索引
+                order_type = self._parse_order_type(order.get("clientOrderId", ""))
+                if order_type in self._orders_by_type:
+                    self._orders_by_type[order_type].add(order_id)
+                else:
+                    self._orders_by_type["unknown"].add(order_id)
+
+                # 价格索引
+                try:
+                    price = float(order.get("price", 0))
+                    side = order.get("side", "")
+                    if price > 0 and side:
+                        price_index = self._bids if side == "BUY" else self._asks
+                        if price not in price_index:
+                            price_index[price] = []
+                        if order_id not in price_index[price]:
+                            price_index[price].append(order_id)
+                except (ValueError, TypeError):
+                    pass
+
+            logging.debug(f"订单簿索引重建完成: {len(self.open_orders)} 订单, "
+                         f"{len(self._bids)} 买价档位, {len(self._asks)} 卖价档位")
+
+    def _trigger_order_persistence(
+        self,
+        order_id: str,
+        new_state: str,
+        order_data: Dict,
+        trigger_source: str = 'internal'
+    ) -> None:
+        """异步触发订单状态持久化
+
+        Args:
+            order_id: 订单ID
+            new_state: 新状态
+            order_data: 订单数据
+            trigger_source: 触发来源 ('websocket', 'rest_api', 'internal')
+        """
+        if not self.order_recorder:
+            return
+
+        try:
+            if hasattr(self.order_recorder, 'record_order'):
+                order_record_data = {
+                    **order_data,
+                    'orderId': order_id,
+                    'state': new_state,
+                    'trigger_source': trigger_source,
+                    'update_time': datetime.now().isoformat()
+                }
+
+                # 使用异步调度器调用async方法
+                if self.async_scheduler:
+                    coro = self.order_recorder.record_order(order_data=order_record_data)
+                    self.async_scheduler(coro)
+                    logging.debug(f"订单状态持久化已调度: {order_id} -> {new_state}")
+                else:
+                    # 降级：直接放入队列
+                    if hasattr(self.order_recorder, 'order_queue'):
+                        order_record_data['recorded_at'] = datetime.now(timezone.utc)
+                        self.order_recorder.order_queue.put_nowait(order_record_data)
+                        logging.debug(f"订单状态直接入队: {order_id} -> {new_state}")
+                    else:
+                        logging.warning(
+                            f"无法持久化订单状态: async_scheduler和order_queue都不可用"
+                        )
+        except Exception as e:
+            logging.error(f"触发订单持久化失败 {order_id}: {e}", exc_info=True)
+
+    def _handle_trade_event(self, trade_data: Dict, trigger_source: str = 'websocket') -> bool:
+        """处理成交事件，更新订单状态
+
+        Args:
+            trade_data: 成交数据，包含 orderId, price, quantity, executedQty 等
+            trigger_source: 触发来源
+
+        Returns:
+            True 如果处理成功
+        """
+        order_id = trade_data.get('orderId') or trade_data.get('i')
+        if not order_id:
+            logging.warning("成交事件缺少orderId")
+            return False
+
+        try:
+            executed_qty = float(trade_data.get('executedQty') or trade_data.get('eq', 0))
+            orig_qty = float(trade_data.get('origQty') or trade_data.get('oq', 0))
+
+            # 根据已执行数量判断状态
+            if executed_qty >= orig_qty and orig_qty > 0:
+                new_state = 'FILLED'
+            elif executed_qty > 0:
+                new_state = 'PARTIALLY_FILLED'
+            else:
+                new_state = 'NEW'
+
+            # 更新订单簿
+            success = self._update_orderbook(
+                order_id=order_id,
+                new_state=new_state,
+                executed_qty=executed_qty,
+                order_data=trade_data
+            )
+
+            # 触发持久化
+            if success:
+                self._trigger_order_persistence(
+                    order_id=order_id,
+                    new_state=new_state,
+                    order_data=trade_data,
+                    trigger_source=trigger_source
+                )
+
+            return success
+
+        except Exception as e:
+            logging.error(f"处理成交事件失败 {order_id}: {e}", exc_info=True)
+            return False
+
+    # ========== Phase 2 结束 ==========
+
+    # ========== Phase 4: 查询接口 ==========
+
+    def get_orders_by_type(self, order_type: str) -> List[Dict]:
+        """按订单类型获取订单列表
+
+        Args:
+            order_type: 订单类型，如 "mm", "wash", "hedge", "antipin", "rebal", "layer_adjust"
+
+        Returns:
+            该类型的所有活跃订单列表
+        """
+        with self._orderbook_lock:
+            order_ids = self._orders_by_type.get(order_type, set())
+            return [self.open_orders[oid] for oid in order_ids if oid in self.open_orders]
+
+    def get_mm_orders(self) -> List[Dict]:
+        """获取所有做市订单（market_making）"""
+        return self.get_orders_by_type("mm")
+
+    def get_wash_orders(self) -> List[Dict]:
+        """获取所有洗盘订单（wash_trading）"""
+        return self.get_orders_by_type("wash")
+
+    def get_hedge_orders(self) -> List[Dict]:
+        """获取所有对冲订单（hedging）"""
+        return self.get_orders_by_type("hedge")
+
+    def get_antipin_orders(self) -> List[Dict]:
+        """获取所有反针订单（anti_pin）"""
+        return self.get_orders_by_type("antipin")
+
+    def get_best_bid(self) -> Optional[float]:
+        """获取最高买价（买1）
+
+        Returns:
+            最高买价，如果没有买单返回 None
+        """
+        with self._orderbook_lock:
+            if self._bids:
+                # SortedDict 默认升序，最后一个是最高价
+                return self._bids.keys()[-1]
+            return None
+
+    def get_best_ask(self) -> Optional[float]:
+        """获取最低卖价（卖1）
+
+        Returns:
+            最低卖价，如果没有卖单返回 None
+        """
+        with self._orderbook_lock:
+            if self._asks:
+                # SortedDict 默认升序，第一个是最低价
+                return self._asks.keys()[0]
+            return None
+
+    def get_spread(self) -> Optional[float]:
+        """获取买卖价差（百分比）
+
+        Returns:
+            买卖价差 = (卖1 - 买1) / 买1，如果缺少数据返回 None
+        """
+        best_bid = self.get_best_bid()
+        best_ask = self.get_best_ask()
+        if best_bid and best_ask and best_bid > 0:
+            return (best_ask - best_bid) / best_bid
+        return None
+
+    def get_orderbook_depth(self, levels: int = 10) -> Dict:
+        """获取订单簿深度（按价格汇总）
+
+        Args:
+            levels: 返回的档位数（每边）
+
+        Returns:
+            包含 bids 和 asks 的字典，每个是 [price, total_quantity] 列表
+        """
+        with self._orderbook_lock:
+            bids_list = []
+            asks_list = []
+
+            # 买单：从高到低
+            for price in reversed(list(self._bids.keys())[-levels:]):
+                order_ids = self._bids[price]
+                total_qty = sum(
+                    float(self.open_orders[oid].get("quantity", 0))
+                    for oid in order_ids if oid in self.open_orders
+                )
+                bids_list.append([price, total_qty])
+
+            # 卖单：从低到高
+            for price in list(self._asks.keys())[:levels]:
+                order_ids = self._asks[price]
+                total_qty = sum(
+                    float(self.open_orders[oid].get("quantity", 0))
+                    for oid in order_ids if oid in self.open_orders
+                )
+                asks_list.append([price, total_qty])
+
+            return {
+                "bids": bids_list,
+                "asks": asks_list,
+            }
+
+    def get_orderbook_snapshot(self) -> Dict:
+        """获取完整订单簿快照
+
+        Returns:
+            包含订单簿完整信息的字典
+        """
+        with self._orderbook_lock:
+            return {
+                "bids": [
+                    {
+                        "price": p,
+                        "orders": [self.open_orders[oid] for oid in oids if oid in self.open_orders]
+                    }
+                    for p, oids in reversed(self._bids.items())
+                ],
+                "asks": [
+                    {
+                        "price": p,
+                        "orders": [self.open_orders[oid] for oid in oids if oid in self.open_orders]
+                    }
+                    for p, oids in self._asks.items()
+                ],
+                "best_bid": self._bids.keys()[-1] if self._bids else None,
+                "best_ask": self._asks.keys()[0] if self._asks else None,
+                "spread": self.get_spread(),
+                "total_orders": len(self.open_orders),
+                "by_type": {
+                    t: len(ids) for t, ids in self._orders_by_type.items()
+                },
+                "timestamp": time.time(),
+            }
+
+    def get_orders_at_price(self, price: float, side: str = None) -> List[Dict]:
+        """获取指定价格的订单
+
+        Args:
+            price: 目标价格
+            side: 可选，"BUY" 或 "SELL"，不指定则搜索两边
+
+        Returns:
+            该价格的所有订单列表
+        """
+        with self._orderbook_lock:
+            result = []
+            if side is None or side == "BUY":
+                if price in self._bids:
+                    result.extend([
+                        self.open_orders[oid]
+                        for oid in self._bids[price]
+                        if oid in self.open_orders
+                    ])
+            if side is None or side == "SELL":
+                if price in self._asks:
+                    result.extend([
+                        self.open_orders[oid]
+                        for oid in self._asks[price]
+                        if oid in self.open_orders
+                    ])
+            return result
+
+    def get_order_count_by_type(self) -> Dict[str, int]:
+        """获取各类型订单数量统计
+
+        Returns:
+            订单类型到数量的映射
+        """
+        with self._orderbook_lock:
+            return {t: len(ids) for t, ids in self._orders_by_type.items()}
+
+    def get_open_orders_list(self, symbol: str = None) -> List[Dict]:
+        """获取挂单列表（兼容旧接口）
+
+        Args:
+            symbol: 可选，过滤指定交易对
+
+        Returns:
+            订单字典列表
+        """
+        with self._orderbook_lock:
+            orders = list(self.open_orders.values())
+            if symbol:
+                orders = [o for o in orders if o.get("symbol") == symbol]
+            return orders
+
+    # ========== Phase 4 结束 ==========
 
     def _init_recorder_loop(self):
         """初始化后台事件循环用于异步操作"""
@@ -369,13 +901,36 @@ class OrderManager:
                 "updatedTime": order_data.get('updatedTime') or order_data.get('ct')
             }
 
-            # ✅ 调用统一状态管理器
-            success = self.state_manager.update_order_state(
-                order_id=order_id,
-                new_state=state,
-                order_data=unified_order_data,
-                trigger_source='websocket'
-            )
+            # ✅ Phase 5.1: 使用统一的订单簿管理，移除 OrderStateManager 依赖
+            # 转换 unified_order_data 为 _update_orderbook 需要的格式
+            orderbook_data = {
+                "orderId": order_id,
+                "clientOrderId": order_data.get('clientOrderId') or order_data.get('ci', ''),
+                "symbol": unified_order_data.get("symbol"),
+                "side": unified_order_data.get("side"),
+                "price": unified_order_data.get("price"),
+                "quantity": unified_order_data.get("quantity"),
+                "executedQty": unified_order_data.get("executed_qty"),
+                "state": state,
+                "update_time": time.time(),
+            }
+            executed_qty = None
+            try:
+                executed_qty = float(unified_order_data.get("executed_qty", 0))
+            except (ValueError, TypeError):
+                pass
+
+            # 更新订单簿状态
+            success = self._update_orderbook(order_id, state, executed_qty, orderbook_data)
+
+            # 触发持久化
+            if success:
+                self._trigger_order_persistence(
+                    order_id=order_id,
+                    new_state=state,
+                    order_data=unified_order_data,
+                    trigger_source='websocket'
+                )
 
             if success:
                 # 更新partially_filled_orders追踪（业务逻辑需要）
@@ -504,12 +1059,12 @@ class OrderManager:
             # 1. 记录成交到recent_fills（用于洗盘交易智能调整）
             self.record_fill(quantity, price)
 
-            # ✅ 2. 调用统一状态管理器处理成交事件
+            # ✅ Phase 5.1: 使用内部成交事件处理，移除 OrderStateManager 依赖
             #   这会自动：
             #   - 更新订单的executed_qty
             #   - 判断订单状态（PARTIALLY_FILLED vs FILLED）
             #   - 触发数据库持久化
-            success = self.state_manager.handle_trade_event(
+            success = self._handle_trade_event(
                 trade_data=trade_data,
                 trigger_source='websocket'
             )
@@ -1091,6 +1646,24 @@ class OrderManager:
             except Exception as e:
                 logging.error(f"记录订单失败: {e}")
 
+        # 🆕 Phase 3: 添加订单到内部订单簿
+        if response:
+            order_info = {
+                "orderId": response.get("orderId"),
+                "clientOrderId": order.clientOrderId,
+                "symbol": order.symbol,
+                "side": order.side,
+                "type": order.type,
+                "price": order.price,
+                "quantity": order.quantity,
+                "executedQty": 0,
+                "state": "NEW",
+                "order_purpose": order_purpose,
+                "create_time": time.time(),
+                "update_time": time.time(),
+            }
+            self._add_to_orderbook(order_info)
+
         return response
 
     @handle_api_error
@@ -1655,6 +2228,9 @@ class OrderManager:
                     "price": res["price"],
                     "quantity": res["origQty"],
                     "orderId": res["orderId"],
+                    "clientOrderId": res.get("clientOrderId", ""),
+                    "state": res["state"],
+                    "executedQty": res.get("executedQty", 0),
                     "time": current_time,
                     "UTC_PLUS_8": datetime.fromtimestamp(
                         current_time, tz=timezone.utc
@@ -1667,29 +2243,46 @@ class OrderManager:
                     "price": res["price"],
                     "quantity": res["origQty"],
                     "orderId": res["orderId"],
+                    "clientOrderId": res.get("clientOrderId", ""),
+                    "state": res["state"],
+                    "executedQty": res.get("executedQty", 0),
                     "time": current_time,
                     "UTC_PLUS_8": datetime.fromtimestamp(
                         current_time, tz=timezone.utc
                     ).astimezone(timezone(timedelta(hours=8))),
                 }
-        # logging.info(f"get {len(current_orders)} open orders! now {len(self.open_orders)} open orders")
+
+        # 🆕 Phase 3: 重建订单簿索引
+        self._rebuild_orderbook_indexes()
+        logging.debug(f"reset_open_orders: 同步 {len(self.open_orders)} 个订单，索引已重建")
 
     def cancel_order(self, order):
-        response = self.client.cancel_order(order["orderId"])
+        """撤销单个订单
+
+        Args:
+            order: 订单字典，必须包含 orderId
+
+        Returns:
+            交易所响应，成功返回响应内容，失败返回 None
         """
-        current_time = time.time()
-        if response is None:
-            self.canceled_orders.append({
-                    "symbol":order["symbol"],
-                    "side": order["side"],
-                    "price": order["price"],
-                    "quantity": order["origQty"],
-                    "orderId": order["orderId"],
-                    "time": current_time,
-                    "UTC_PLUS_8": datetime.fromtimestamp(current_time, tz=timezone.utc).astimezone(timezone(timedelta(hours=8))),
-                    "state": "CANCELED",
-                })
-        """
+        order_id = order.get("orderId") if isinstance(order, dict) else order
+        response = self.client.cancel_order(order_id)
+
+        # 🆕 Phase 3: 从内部订单簿移除并记录
+        if response is not None:
+            removed = self._remove_from_orderbook(order_id)
+            if removed:
+                removed["state"] = "CANCELED"
+                removed["cancel_time"] = time.time()
+                self.canceled_orders.append(removed)
+                logging.debug(f"订单 {order_id} 已撤销并从订单簿移除")
+        else:
+            # 撤单API调用失败，但订单可能已经被成交或不存在
+            # 仍然尝试从本地订单簿移除（如果存在）
+            with self._orderbook_lock:
+                if order_id in self.open_orders:
+                    logging.warning(f"撤单API失败但订单 {order_id} 仍在本地，可能需要同步")
+
         return response
 
     def cancel_orders_batch(self, orders):
@@ -2029,7 +2622,13 @@ class OrderManager:
                             "state": res["state"],
                         }
 
-                        self.state_manager.update_order_state(
+                        # ✅ Phase 5.1: 使用内部订单簿管理
+                        self._update_orderbook(
+                            order_id=res["orderId"],
+                            new_state='CANCELED',
+                            order_data=canceled_order_data
+                        )
+                        self._trigger_order_persistence(
                             order_id=res["orderId"],
                             new_state='CANCELED',
                             order_data=canceled_order_data,
@@ -2125,9 +2724,15 @@ class OrderManager:
                             "state": res["state"],
                         }
 
-                        # ✅ 使用OrderStateManager统一处理订单成交
+                        # ✅ Phase 5.1: 使用内部订单簿管理
                         # 替换原有的直接操作：self.filled_orders.append(...)
-                        self.state_manager.update_order_state(
+                        self._update_orderbook(
+                            order_id=res["orderId"],
+                            new_state='FILLED',
+                            executed_qty=float(res.get("executedQty", 0)),
+                            order_data=filled_order_data
+                        )
+                        self._trigger_order_persistence(
                             order_id=res["orderId"],
                             new_state='FILLED',
                             order_data=filled_order_data,
@@ -2324,11 +2929,17 @@ class OrderManager:
                         trade_purpose = res.get("order_purpose", "market_making")
                         self.record_trade(trade_data, trade_purpose=trade_purpose)
 
-                        # ✅ 使用OrderStateManager统一处理订单状态变更
+                        # ✅ Phase 5.1: 使用内部订单簿管理
                         # 替换原有的直接操作：
                         #   self.filled_orders.append(res["orderId"])
                         #   self.remove_order(res["orderId"])
-                        self.state_manager.update_order_state(
+                        self._update_orderbook(
+                            order_id=res["orderId"],
+                            new_state='FILLED',
+                            executed_qty=float(res.get("executedQty", 0)),
+                            order_data=res
+                        )
+                        self._trigger_order_persistence(
                             order_id=res["orderId"],
                             new_state='FILLED',
                             order_data=res,

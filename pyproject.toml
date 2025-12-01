@@ -35,6 +35,8 @@ dependencies = [
     "prometheus-client>=0.17.0",
     # Binance 交易接口 (使用 ccxt 统一 API)
     "ccxt>=4.0.0",
+    "pytest>=8.3.5",
+    "sortedcontainers>=2.4.0",  # 用于订单簿价格索引
 ]
 
 [project.optional-dependencies]
@@ -91,6 +93,7 @@ python_classes = ["Test*", "*Tests"]
 python_functions = ["test_*"]
 markers = [
     "slow: marks tests as slow (may take more than 1 second)",
+    "stress: marks tests as stress tests (millions of iterations)",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "redis_required: marks tests that require Redis",

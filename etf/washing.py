@@ -9,6 +9,7 @@ import numpy as np
 import redis
 
 from etf.utils.optimization import performance_monitor
+from etf.xt import XtBusinessError
 from etf.utils.constants import (
     DEFAULT_REDIS_HOST, DEFAULT_REDIS_PORT, DEFAULT_REDIS_DB,
     DEFAULT_MAX_TRADE_AMOUNT, DEFAULT_MIN_TRADE_VALUE,
@@ -1071,8 +1072,20 @@ class WashOrderTracker:
                 f"订单对={pair_id}, 原因={reason}"
             )
             return True
+        except XtBusinessError as e:
+            # ORDER_005 订单不存在 - 视为成功（已成交或被其他地方撤销）
+            if e.message_code == "ORDER_005":
+                logging.info(
+                    f"[WashTracker] 订单已不存在(可能已成交): {order_id}"
+                )
+                return True
+            # 其他业务错误
+            logging.debug(
+                f"[WashTracker] 撤销订单失败: {order_id}, {e}"
+            )
+            return False
         except Exception as e:
-            # 可能订单已经被撤销或成交
+            # 其他异常
             logging.debug(
                 f"[WashTracker] 撤销订单失败(可能已处理): {order_id}, {e}"
             )

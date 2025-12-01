@@ -15,7 +15,7 @@ import threading
 from queue import Queue
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import select, update
+from sqlalchemy import select, update, insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError, IntegrityError
 from tenacity import (
@@ -580,8 +580,8 @@ class OrderRecorder:
         """批量写入成交数据到PostgreSQL（带重试）"""
         trades = []
 
-        # 从队列中获取成交（最多100条）
-        while not self.trade_queue.empty() and len(trades) < 100:
+        # 从队列中获取成交（最多200条，分批处理）
+        while not self.trade_queue.empty() and len(trades) < 200:
             try:
                 trade = self.trade_queue.get_nowait()
                 trades.append(trade)
@@ -619,10 +619,17 @@ class OrderRecorder:
                         }
                         trade_records.append(record)
 
-                    # 批量插入
-                    await session.execute(
-                        pg_insert(TradeModel).values(trade_records)
-                    )
+                    # 分批插入，每批最多50条（避免PostgreSQL 65535参数限制）
+                    # 每条trade记录有13个字段，50条 * 13 = 650参数，远低于65535
+                    batch_size = 50
+                    total_inserted = 0
+                    for i in range(0, len(trade_records), batch_size):
+                        batch = trade_records[i:i + batch_size]
+                        await session.execute(
+                            pg_insert(TradeModel).values(batch)
+                        )
+                        total_inserted += len(batch)
+                    
                     await session.commit()
 
                     self.stats["db_write_success"] += len(trades)
