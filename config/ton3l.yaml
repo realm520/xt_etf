@@ -1,5 +1,6 @@
 # TON 3x 做多策略配置
 # 覆盖 strategies.yaml 中的默认值
+# 注意: orderbook_maintainer 配置已移至 strategies.yaml
 
 strategy:
   prefix: "ton3l"

@@ -14,8 +14,7 @@ defaults:
   Hedging_interval: 20         # 对冲间隔
   washing_lambda: 10           # 洗盘平均间隔（默认10秒）
   
-  # 订单簿预设
-  orderbook_preset: "layered"  # 默认使用layered预设
+  # K线连续性配置
   kline_continuity_interval: 60
 
   # 洗盘成交量配置
@@ -44,103 +43,35 @@ defaults:
   anti_pin_rate: 0.2
   bid_ask_spread: 0.008            # 默认 0.8% 价差
 
-  orderbook_maintainer:
-    enabled: true
-    spread: 0.008
-    max_distance: 0.10
-    total_budget: 10000
-    min_price_change: 0.002
-    max_operations_per_cycle: 30
-
-  # 分层订单调整配置
-  layer_adjustment:
-    enabled: true                    # 是否启用分层调整
-    near_book:                       # 近盘口 (NAV ±0.5%)
-      min_depth: 100                 # 最小深度 (USDT)
-      max_imbalance: 0.30            # 最大不平衡度 30%
-      max_density: 0.002             # 最大价格间隔 0.2%
-      target_spread: 0.008           # 目标价差（继承 bid_ask_spread）
-    mid_book:                        # 中盘口 (0.5%-2%)
-      min_depth: 200                 # 最小深度 (USDT)
-      max_imbalance: 0.50            # 最大不平衡度 50%
-    far_book:                        # 远盘口 (2%-10%)
-      min_count: 10                  # 最小订单数
-      max_imbalance: 0.60            # 最大不平衡度 60%
-
-
-  # 分层平衡管理器配置（新增）
-  balance_manager:
-    enabled: true
-    
-    global:
-      order_limit: 200             # XT交易所订单上限
-      safety_margin: 5             # 安全余量
-      antipin_reserve: 5           # 反针对预留
-      check_interval: 5            # 检查间隔（秒）
-    
-    layers:
-      near:
-        range: [0, 0.005]          # NAV ±0.5%
-        imbalance_threshold: 0.10  # 10%触发调整
-        max_allowed_imbalance: 0.20
-        force_best_price: true     # 硬性保证买一卖一
-        priority: 100
-        max_adjustment_per_cycle: 5
-        bid_ask_spread: 0.008      # 继承主配置
-      
-      mid:
-        range: [0.005, 0.02]       # 0.5%-2%
-        imbalance_threshold: 0.10
-        max_allowed_imbalance: 0.30
-        priority: 50
-        max_adjustment_per_cycle: 8
-      
-      far:
-        range: [0.02, 0.10]        # 2%-10%
-        imbalance_threshold: 0.20  # 远盘口允许更大不平衡
-        max_allowed_imbalance: 0.50
-        priority: 20
-        max_adjustment_per_cycle: 10
-        defense_mode: true         # 防御优先：主要删除超额
-    
-    reliability:
-      protect_best_orders: true    # 保护买一卖一
-      protect_count: 2             # 保护前2档
-      max_retries: 3
-      emergency_repair_enabled: true
-
-  # 订单更新控制
-  price_change_threshold: 0.001    # 价格变化阈值 0.1%（从0.3%降低，确保近盘口及时更新）
-  min_update_interval: 15          # 最小更新间隔（秒）（从30秒降低到15秒）
-  
-  # 近盘口强制对齐配置（新增）
-  near_book_alignment:
-    enabled: true                  # 启用近盘口强制对齐
-    max_deviation: 0.002           # 最大允许偏差 0.2%（超过则强制修复）
-    force_repair: true             # 超过偏差时强制修复
-    check_on_every_update: true    # 每次更新都检查
-
   # ========================================
-  # Maintainer 订单簿维护系统配置（新）
+  # Maintainer 订单簿维护系统配置
   # ========================================
   orderbook_maintainer:
-    enabled: false                 # 默认禁用，各策略按需启用
-    spread: 0.008                  # 买卖价差
+    enabled: true                  # 默认启用
+    spread: 0.005                  # 买卖价差 0.5%
     max_distance: 0.10             # 最大距离（相对于NAV）
-    total_budget: 10000            # 总预算 (USDT)
+    total_budget: 15000            # 总预算 (USDT)
     min_order_value: 10            # 最小订单金额
-    min_price_change: 0.002        # 最小价格变化触发更新
-    max_operations_per_cycle: 30   # 每周期最大操作数
-    max_orders: 200                # 最大订单数
-    order_overflow_threshold: 0.9  # 订单溢出阈值（触发先删后加）
+    min_price_change: 0.001        # 0.1% 变化触发更新
+    max_operations_per_cycle: 100  # 每周期最大操作数
+    max_orders: 200                # 最大订单数（XT交易所限制）
+    order_overflow_threshold: 0.85 # 订单溢出阈值
 
-  # 订单簿算法配置（旧路径，与 Maintainer 互斥）
-  orderbook_algorithm: "natural"
-  orderbook_config:
-    total_budget: 10000.0
-    layer: 200                     # 总档位（避免ORDER_006错误）
-    extra_params:
-      naturalness: "high"
+    # 近盘口配置（等差分布，密集）
+    near_layer:
+      distance_min: 0              # 从 spread/2 开始
+      distance_max: 0.03           # 到 NAV ±3%
+      order_count: 50              # 单边 50 档
+      budget_ratio: 0.5            # 占总预算 50%
+      distribution: "arithmetic"   # 等差分布
+
+    # 远盘口配置（等比分布，稀疏）
+    far_layer:
+      distance_min: 0.03           # 从 3% 开始
+      distance_max: 0.10           # 到 NAV ±10%
+      order_count: 50              # 单边 50 档
+      budget_ratio: 0.5            # 占总预算 50%
+      distribution: "geometric"    # 等比分布
 
   # 净值计算参数
   net_value_interval: 1            # 净值更新间隔（秒）
@@ -159,47 +90,6 @@ defaults:
     check_interval: 60             # 检查间隔（秒）
 
 # ========================================
-# 订单簿算法预设
-# ========================================
-orderbook_presets:
-  # 分层订单簿（适合需要精细控制的策略）
-  layered:
-    orderbook_algorithm: "layered"
-    orderbook_config:
-      total_budget: 10000.0
-      layer: 200
-      near_book:
-        distance_threshold: 0.005    # 净值±0.5%
-        layer_count: 20
-        price_tolerance: 0.001
-        update_interval: 30
-        price_change_trigger: 0.002
-        budget_ratio: 0.3
-      transition_zone:
-        distance_range: [0.005, 0.02]
-        layer_count: 60
-        price_tolerance: 0.003
-        update_interval: 60
-        price_change_trigger: 0.005
-        budget_ratio: 0.4
-      far_book:
-        distance_range: [0.02, 0.10]
-        layer_count: 120
-        price_tolerance: 0.01
-        update_interval: 180
-        price_change_trigger: 0.01
-        budget_ratio: 0.3
-
-  # 自然分布订单簿（默认）
-  natural:
-    orderbook_algorithm: "natural"
-    orderbook_config:
-      total_budget: 10000.0
-      layer: 200
-      extra_params:
-        naturalness: "high"
-
-# ========================================
 # 数据库配置
 # ========================================
 database:
@@ -214,3 +104,13 @@ database:
 
   order_persistence:
     enabled: false               # 当前使用CSV降级
+
+# ========================================
+# 策略特定配置（按需覆盖全局默认值）
+# ========================================
+strategies:
+  # TON 3x 做多策略
+  ton3l: {}  # 使用全局默认配置
+
+  # TON 3x 做空策略
+  ton3s: {}  # 使用全局默认配置

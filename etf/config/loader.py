@@ -144,12 +144,13 @@ def load_strategy_config(
     config_file: str = "config/strategies.yaml",
     exit_on_error: bool = False
 ) -> Dict[str, Any]:
-    """加载策略配置（全局默认 + 预设 + 策略特定覆盖）
+    """加载策略配置（全局默认 + strategies配置 + 预设 + 策略特定文件覆盖）
     
     配置合并优先级（从低到高）：
     1. 全局默认配置 (defaults)
-    2. 订单簿预设 (orderbook_presets)
-    3. 策略特定配置 (config/<strategy>.yaml)
+    2. strategies.yaml 中的策略配置 (strategies.<strategy_name>)
+    3. 订单簿预设 (orderbook_presets)
+    4. 策略特定配置文件 (config/<strategy>.yaml)
     
     Args:
         strategy_name: 策略名称
@@ -178,34 +179,41 @@ def load_strategy_config(
         # 1. 从全局默认配置开始
         result = dict(global_config.get("defaults", {}))
         
-        # 2. 加载策略特定配置文件
+        # 2. 应用 strategies.yaml 中的策略特定配置
+        strategies_section = global_config.get("strategies", {})
+        if strategy_name in strategies_section:
+            strategy_in_yaml = strategies_section[strategy_name]
+            result = _deep_merge(result, strategy_in_yaml)
+            logging.info(f"应用 strategies.yaml 中的 {strategy_name} 配置")
+        
+        # 3. 加载策略特定配置文件（如果存在）
         strategy_file = _find_strategy_file(strategy_name, config_path)
         
-        if not strategy_file:
+        if strategy_file:
+            with open(strategy_file, "r", encoding="utf-8") as f:
+                strategy_data = yaml.safe_load(f)
+                strategy_config = strategy_data.get("strategy", {})
+            
+            logging.info(f"加载策略配置文件: {strategy_file}")
+            
+            # 4. 应用订单簿预设
+            orderbook_preset = strategy_config.get("orderbook_preset")
+            if orderbook_preset and "orderbook_presets" in global_config:
+                preset = global_config["orderbook_presets"].get(orderbook_preset, {})
+                result = _deep_merge(result, preset)
+                logging.debug(f"应用订单簿预设: {orderbook_preset}")
+            
+            # 5. 应用策略特定配置文件（最高优先级）
+            strategy_overrides = {k: v for k, v in strategy_config.items() 
+                                if k not in ("orderbook_preset",)}
+            result = _deep_merge(result, strategy_overrides)
+        elif strategy_name not in strategies_section:
+            # 既没有 strategies 配置，也没有策略文件
             if exit_on_error:
-                logging.error(f"策略配置文件 config/{strategy_name}.yaml 不存在")
+                logging.error(f"策略 {strategy_name} 配置不存在（无 strategies.yaml 配置，无 config/{strategy_name}.yaml 文件）")
                 sys.exit(1)
             else:
-                logging.warning(f"策略配置文件 config/{strategy_name}.yaml 不存在")
-                return result
-        
-        with open(strategy_file, "r", encoding="utf-8") as f:
-            strategy_data = yaml.safe_load(f)
-            strategy_config = strategy_data.get("strategy", {})
-        
-        logging.info(f"加载策略配置: {strategy_file}")
-        
-        # 3. 应用订单簿预设
-        orderbook_preset = strategy_config.get("orderbook_preset")
-        if orderbook_preset and "orderbook_presets" in global_config:
-            preset = global_config["orderbook_presets"].get(orderbook_preset, {})
-            result = _deep_merge(result, preset)
-            logging.debug(f"应用订单簿预设: {orderbook_preset}")
-        
-        # 4. 应用策略特定配置（最高优先级）
-        strategy_overrides = {k: v for k, v in strategy_config.items() 
-                            if k not in ("orderbook_preset",)}
-        result = _deep_merge(result, strategy_overrides)
+                logging.warning(f"策略 {strategy_name} 使用默认配置")
         
         return result
         

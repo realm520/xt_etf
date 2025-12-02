@@ -440,6 +440,10 @@ def main():
     if "orderbook_config" in strategy_config:
         config["orderbook_config"] = strategy_config["orderbook_config"]
 
+    # ✅ 添加 Maintainer 订单簿维护配置（重要！）
+    if "orderbook_maintainer" in strategy_config:
+        config["orderbook_maintainer"] = strategy_config["orderbook_maintainer"]
+
     # 添加策略名称用于特殊处理
     if args.strategy:
         config["strategy_name"] = args.strategy
@@ -849,6 +853,10 @@ def main():
         
         # ✅ 初始化 Maintainer（如果启用）
         maintainer_config = config.get("orderbook_maintainer", {})
+        logging.debug(f"📋 Maintainer 配置: enabled={maintainer_config.get('enabled', False)}, "
+                     f"spread={maintainer_config.get('spread')}, "
+                     f"total_budget={maintainer_config.get('total_budget')}, "
+                     f"near_layer={maintainer_config.get('near_layer', {}).get('order_count')}")
         if maintainer_config.get("enabled", False):
             market_maker.init_maintainer(
                 config=maintainer_config,
