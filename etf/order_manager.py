@@ -351,7 +351,7 @@ class OrderManager:
 
     def _update_orderbook(self, order_id: str, new_state: str,
                           executed_qty: float = None,
-                          order_data: Dict = None) -> bool:
+                          order_data: Dict = None) -> Tuple[bool, str]:
         """更新订单簿中的订单状态（线程安全）
 
         处理逻辑:
@@ -366,7 +366,10 @@ class OrderManager:
             order_data: 订单完整数据（用于新订单添加）
 
         Returns:
-            True 如果更新成功，False 如果订单不存在且无法添加
+            Tuple[bool, str]: (成功标志, 原因说明)
+            - (True, "ok") 更新成功
+            - (False, "not_tracked") 订单不在本地追踪中（可能是程序重启后的历史订单）
+            - (False, "terminal_not_tracked") 终态订单不在追踪中（正常情况，无需担心）
         """
         with self._orderbook_lock:
             if order_id not in self.open_orders:
@@ -391,8 +394,12 @@ class OrderManager:
                                 price_index[price].append(order_id)
                     except (ValueError, TypeError):
                         pass
-                    return True
-                return False
+                    return (True, "ok")
+                
+                # 区分终态和非终态的未追踪订单
+                if new_state in ['FILLED', 'CANCELED', 'REJECTED', 'EXPIRED']:
+                    return (False, "terminal_not_tracked")
+                return (False, "not_tracked")
 
             order = self.open_orders[order_id]
             order["state"] = new_state
@@ -411,7 +418,7 @@ class OrderManager:
                     else:
                         self.canceled_orders.append(removed)
 
-            return True
+            return (True, "ok")
 
     def _rebuild_orderbook_indexes(self) -> None:
         """重建订单簿索引（在 reset_open_orders 后调用）
@@ -524,7 +531,7 @@ class OrderManager:
                 new_state = 'NEW'
 
             # 更新订单簿
-            success = self._update_orderbook(
+            success, reason = self._update_orderbook(
                 order_id=order_id,
                 new_state=new_state,
                 executed_qty=executed_qty,
@@ -921,7 +928,7 @@ class OrderManager:
                 pass
 
             # 更新订单簿状态
-            success = self._update_orderbook(order_id, state, executed_qty, orderbook_data)
+            success, reason = self._update_orderbook(order_id, state, executed_qty, orderbook_data)
 
             # 触发持久化
             if success:
@@ -953,7 +960,13 @@ class OrderManager:
                     if state == 'FILLED':
                         self._record_trade_from_order_update(unified_order_data, order_id)
             else:
-                logging.warning(f"订单状态更新失败（可能是非法转换）: {order_id} -> {state}")
+                # 根据原因输出不同级别的日志
+                if reason == "terminal_not_tracked":
+                    # 终态订单不在追踪中是正常情况（程序重启后收到历史订单的取消/成交通知）
+                    logging.debug(f"忽略未追踪订单的终态更新: {order_id} -> {state} (可能是程序重启前的历史订单)")
+                else:
+                    # 非终态订单不在追踪中，可能需要关注
+                    logging.warning(f"订单状态更新失败 - 订单不在本地追踪中: {order_id} -> {state}")
 
         except Exception as e:
             logging.error(f"处理订单更新失败: {e}", exc_info=True)

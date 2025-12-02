@@ -138,16 +138,24 @@ class OrderbookMaintainer:
         price_direction = self._get_price_direction(nav_change_pct)
         sorted_operations = self._sort_operations(raw_operations, price_direction)
 
-        # 6. 限制操作数量
-        limited_operations, was_limited = self._limit_operations(sorted_operations)
+        # 6. 判断是否为初始化阶段（当前订单簿为空或几乎为空）
+        current_order_count = len(current.bids) + len(current.asks)
+        target_order_count = len(target.bids) + len(target.asks)
+        # 初始化阶段：当前订单数 < 目标订单数的 20%
+        is_initial = current_order_count < target_order_count * 0.2
 
-        # 7. 计算指标
+        # 7. 限制操作数量（初始化阶段不限制）
+        limited_operations, was_limited = self._limit_operations(
+            sorted_operations, is_initial=is_initial
+        )
+
+        # 8. 计算指标
         metrics = MetricsCalculator.calculate(target.bids, target.asks)
 
-        # 8. 更新状态
+        # 9. 更新状态
         self._last_nav = new_nav
 
-        # 9. 构建结果
+        # 10. 构建结果
         stats = MaintenanceStats(
             nav_change=nav_change,
             nav_change_pct=nav_change_pct,
@@ -272,41 +280,138 @@ class OrderbookMaintainer:
     def _limit_operations(
         self,
         operations: List[OrderOperation],
+        is_initial: bool = False,
     ) -> Tuple[List[OrderOperation], bool]:
         """
-        限制操作数量
+        限制操作数量（智能平衡 add/cancel 和 bid/ask）
+
+        策略：
+        1. 初始化阶段：不限制操作数量，一次性挂满所有订单
+        2. 维护阶段：限制每周期操作数量
+           - 平衡 add 和 cancel 的比例
+           - **关键**: 平衡 bid 和 ask 两侧的操作，避免单边被清空
 
         Args:
             operations: 操作列表
+            is_initial: 是否为初始化阶段（首次建仓）
 
         Returns:
             (limited_operations, was_limited)
         """
+        # 初始化阶段：不限制，一次性挂满所有订单
+        if is_initial:
+            return operations, False
+
         max_ops = self.config.max_operations_per_cycle
 
         if len(operations) <= max_ops:
             return operations, False
 
-        # 优先保留添加操作（保持流动性）
-        add_ops = [op for op in operations if op.action == "add"]
-        cancel_ops = [op for op in operations if op.action == "cancel"]
+        # 按 action 和 side 四维分类
+        add_bids = [op for op in operations if op.action == "add" and op.side == "bid"]
+        add_asks = [op for op in operations if op.action == "add" and op.side == "ask"]
+        cancel_bids = [op for op in operations if op.action == "cancel" and op.side == "bid"]
+        cancel_asks = [op for op in operations if op.action == "cancel" and op.side == "ask"]
 
-        result = []
-        remaining = max_ops
+        total_ops = len(operations)
+        if total_ops == 0:
+            return [], True
 
-        # 先添加 add 操作
-        for op in add_ops:
-            if remaining <= 0:
-                break
-            result.append(op)
-            remaining -= 1
+        # 计算 add 和 cancel 的总数
+        total_adds = len(add_bids) + len(add_asks)
+        total_cancels = len(cancel_bids) + len(cancel_asks)
 
-        # 再添加 cancel 操作
-        for op in cancel_ops:
-            if remaining <= 0:
-                break
-            result.append(op)
-            remaining -= 1
+        # 第一步：确定 add 和 cancel 的配额
+        if total_cancels >= max_ops:
+            # cancel 很多，给 80% 配额
+            cancel_quota = int(max_ops * 0.8)
+            add_quota = max_ops - cancel_quota
+        elif total_cancels > total_adds:
+            # cancel > add，给 60% 配额
+            cancel_quota = int(max_ops * 0.6)
+            add_quota = max_ops - cancel_quota
+        elif total_cancels >= max_ops * 0.5:
+            # cancel 较多，50% 配额
+            cancel_quota = int(max_ops * 0.5)
+            add_quota = max_ops - cancel_quota
+        else:
+            # 正常情况，按原始比例分配，cancel 至少 30%
+            if total_cancels > 0:
+                cancel_ratio = max(total_cancels / total_ops, 0.3)
+                if total_cancels < max_ops * 0.3:
+                    cancel_quota = total_cancels
+                else:
+                    cancel_quota = int(max_ops * cancel_ratio)
+                add_quota = max_ops - cancel_quota
+            else:
+                add_quota = max_ops
+                cancel_quota = 0
+
+        # 第二步：在 add/cancel 配额内，平衡 bid/ask
+        # 原则：每侧至少获得 40% 的该类操作配额（避免单边被清空）
+        
+        def balanced_select(ops_side1: List, ops_side2: List, quota: int) -> Tuple[List, List]:
+            """
+            平衡选择两侧的操作
+            
+            确保每侧至少获得 40% 配额（如果有足够的操作）
+            """
+            if quota <= 0:
+                return [], []
+            
+            total = len(ops_side1) + len(ops_side2)
+            if total == 0:
+                return [], []
+            
+            if total <= quota:
+                # 不需要限制
+                return ops_side1, ops_side2
+            
+            # 计算每侧的最小配额（40%）
+            min_ratio = 0.4
+            min_per_side = int(quota * min_ratio)
+            
+            # 如果一侧没有操作，全部给另一侧
+            if len(ops_side1) == 0:
+                return [], ops_side2[:quota]
+            if len(ops_side2) == 0:
+                return ops_side1[:quota], []
+            
+            # 两侧都有操作，平衡分配
+            # 先给每侧最小配额
+            side1_quota = min(len(ops_side1), min_per_side)
+            side2_quota = min(len(ops_side2), min_per_side)
+            
+            # 剩余配额按原始比例分配
+            remaining = quota - side1_quota - side2_quota
+            if remaining > 0:
+                # 按原始比例分配剩余配额
+                side1_remaining = len(ops_side1) - side1_quota
+                side2_remaining = len(ops_side2) - side2_quota
+                total_remaining = side1_remaining + side2_remaining
+                
+                if total_remaining > 0:
+                    side1_extra = int(remaining * side1_remaining / total_remaining)
+                    side1_extra = min(side1_extra, side1_remaining)
+                    side2_extra = min(remaining - side1_extra, side2_remaining)
+                    
+                    side1_quota += side1_extra
+                    side2_quota += side2_extra
+            
+            return ops_side1[:side1_quota], ops_side2[:side2_quota]
+
+        # 平衡选择 add 操作（bid vs ask）
+        selected_add_bids, selected_add_asks = balanced_select(
+            add_bids, add_asks, min(add_quota, total_adds)
+        )
+        
+        # 平衡选择 cancel 操作（bid vs ask）
+        selected_cancel_bids, selected_cancel_asks = balanced_select(
+            cancel_bids, cancel_asks, min(cancel_quota, total_cancels)
+        )
+
+        # 合并结果（保持原始排序顺序已经在 _sort_operations 中处理）
+        result = selected_add_bids + selected_add_asks + selected_cancel_bids + selected_cancel_asks
 
         return result, True
 

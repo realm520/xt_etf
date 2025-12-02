@@ -15,7 +15,7 @@ DEFAULT_REDIS_DB = 0
 # 订单配置
 DEFAULT_BATCH_SIZE = 100
 MAX_BATCH_SIZE_CANCEL = 100
-MAX_BATCH_SIZE_SEND = 100
+MAX_BATCH_SIZE_SEND = 20  # XT 交易所批量下单实际限制（保守设置，避免 batch too large 错误）
 DEFAULT_BATCH_ID = 51232
 
 # 客户端订单ID默认值

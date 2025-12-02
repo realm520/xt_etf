@@ -296,11 +296,22 @@ class MarketMaker:
         # 4. 记录操作统计
         add_count = sum(1 for op in result.operations if op.action == "add")
         cancel_count = sum(1 for op in result.operations if op.action == "cancel")
-        logger.info(
-            f"[{strategy_name}] 生成 {len(result.operations)} 个操作: "
-            f"+{add_count} add, -{cancel_count} cancel, "
-            f"复用率: {float(result.stats.reuse_ratio):.1%}"
-        )
+
+        # 判断是否为初始化阶段（与 core.py 逻辑一致）
+        target_order_count = len(result.target_snapshot.bids) + len(result.target_snapshot.asks)
+        is_initial = mm_order_count < target_order_count * 0.2
+
+        if is_initial:
+            logger.info(
+                f"[{strategy_name}] 🚀 初始化订单簿: "
+                f"一次性添加 {add_count} 个订单 (目标: {target_order_count})"
+            )
+        else:
+            logger.info(
+                f"[{strategy_name}] 生成 {len(result.operations)} 个操作: "
+                f"+{add_count} add, -{cancel_count} cancel, "
+                f"复用率: {float(result.stats.reuse_ratio):.1%}"
+            )
         
         # 5. 使用 ExecutorV2 执行操作
         exec_result: ExecutionResult = self.executor.execute(

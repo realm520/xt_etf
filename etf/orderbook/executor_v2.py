@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from ..order_manager import OrderManager
 
 from .base import OrderOperation
+from ..utils.constants import MAX_BATCH_SIZE_SEND
 
 
 @dataclass
@@ -260,7 +261,7 @@ class OrderExecutorV2:
         add_ops: List[OrderOperation],
     ) -> Dict:
         """
-        执行添加订单操作
+        执行添加订单操作（批量下单，自动分批）
 
         Args:
             add_ops: 添加操作列表
@@ -271,40 +272,117 @@ class OrderExecutorV2:
         succeeded = []
         failed = []
 
+        if not add_ops:
+            return {"succeeded": succeeded, "failed": failed}
+
+        # 构建批量订单数据
+        all_orders = []
+        all_mappings = []  # 记录每个订单对应的原始操作
+
         for op in add_ops:
             try:
-                # 转换为 OrderManager 参数
                 side = "BUY" if op.side == "bid" else "SELL"
-
-                # 格式化价格和数量
                 price = float(round(op.price, self.price_precision))
                 quantity = float(round(op.quantity, self.quantity_precision))
 
-                response = self.order_manager.add_order(
-                    symbol=self.symbol,
-                    side=side,
-                    price=price,
-                    quantity=quantity,
+                # 生成 clientOrderId
+                base_id = self.order_manager.create_temp_id()
+                client_order_id = f"mm_{base_id}"
+
+                all_orders.append({
+                    "symbol": self.symbol,
+                    "side": side,
+                    "type": "LIMIT",
+                    "timeInForce": "GTC",
+                    "bizType": "SPOT",
+                    "price": price,
+                    "quantity": quantity,
+                    "clientOrderId": client_order_id,
+                    "order_purpose": "market_making",
+                })
+                all_mappings.append({
+                    "op": op,
+                    "price": price,
+                    "quantity": quantity,
+                    "client_order_id": client_order_id,
+                })
+
+            except Exception as e:
+                failed.append((op, f"构建订单失败: {e}"))
+                self.logger.warning(
+                    f"构建订单失败: {op.side} @ {op.price} x {op.quantity}, 错误: {e}"
+                )
+
+        if not all_orders:
+            return {"succeeded": succeeded, "failed": failed}
+
+        # ✅ 分批处理：XT 交易所批量下单限制
+        MAX_BATCH_SIZE = MAX_BATCH_SIZE_SEND
+        total_batches = (len(all_orders) + MAX_BATCH_SIZE - 1) // MAX_BATCH_SIZE
+        
+        self.logger.info(
+            f"批量下单: 共 {len(all_orders)} 个订单，分 {total_batches} 批处理"
+        )
+
+        for batch_idx in range(0, len(all_orders), MAX_BATCH_SIZE):
+            batch_orders = all_orders[batch_idx:batch_idx + MAX_BATCH_SIZE]
+            batch_mappings = all_mappings[batch_idx:batch_idx + MAX_BATCH_SIZE]
+            batch_num = batch_idx // MAX_BATCH_SIZE + 1
+
+            # 执行批量下单
+            try:
+                response = self.order_manager.add_orders_batch(
+                    batch_orders,
                     order_purpose="market_making",
                 )
 
-                if response:
-                    succeeded.append({
-                        "order_id": response.get("orderId"),
-                        "client_order_id": response.get("clientOrderId"),
-                        "side": op.side,
-                        "price": price,
-                        "quantity": quantity,
-                        "reason": op.reason,
-                    })
+                if response and response.get("items"):
+                    # 处理响应
+                    for i, item in enumerate(response["items"]):
+                        if i >= len(batch_mappings):
+                            break
+
+                        mapping = batch_mappings[i]
+                        op = mapping["op"]
+
+                        if item.get("rejected"):
+                            failed.append((op, f"被交易所拒绝: {item.get('reason')}"))
+                            self.logger.warning(
+                                f"订单被拒绝: {op.side} @ {mapping['price']}, "
+                                f"原因: {item.get('reason')}"
+                            )
+                        else:
+                            succeeded.append({
+                                "order_id": item.get("orderId"),
+                                "client_order_id": item.get("clientOrderId") or mapping["client_order_id"],
+                                "side": op.side,
+                                "price": mapping["price"],
+                                "quantity": mapping["quantity"],
+                                "reason": op.reason,
+                            })
+
+                    batch_success = sum(1 for item in response["items"] if not item.get("rejected"))
+                    self.logger.debug(
+                        f"批次 {batch_num}/{total_batches} 完成: "
+                        f"{batch_success}/{len(batch_orders)} 成功"
+                    )
                 else:
-                    failed.append((op, "order_manager returned None"))
+                    # 批量下单失败，全部标记为失败
+                    for mapping in batch_mappings:
+                        failed.append((mapping["op"], "批量下单返回空响应"))
+                    self.logger.error(f"批次 {batch_num}/{total_batches} 返回空响应")
 
             except Exception as e:
-                failed.append((op, str(e)))
-                self.logger.warning(
-                    f"添加订单失败: {op.side} @ {op.price} x {op.quantity}, 错误: {e}"
-                )
+                # 批量下单异常，当前批次全部标记为失败
+                for mapping in batch_mappings:
+                    failed.append((mapping["op"], str(e)))
+                self.logger.error(f"批次 {batch_num}/{total_batches} 异常: {e}")
+
+        # 最终统计
+        self.logger.info(
+            f"批量下单完成: {len(succeeded)}/{len(all_orders)} 成功, "
+            f"{len(failed)} 失败"
+        )
 
         return {"succeeded": succeeded, "failed": failed}
 
