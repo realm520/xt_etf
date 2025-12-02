@@ -2,6 +2,11 @@
 订单簿维护器大规模压力测试
 
 测试100万次以上净值波动和订单簿调整，验证长期稳定性
+
+注意：
+- 百万级测试标记为 @pytest.mark.slow，默认跳过
+- 运行慢速测试: pytest -m slow --timeout=600
+- 千万级测试标记为 @pytest.mark.stress，需要更长时间
 """
 
 import pytest
@@ -21,6 +26,15 @@ from etf.orderbook.maintainer import (
     MetricsCalculator,
     MaintenanceResult,
 )
+
+
+# 跳过慢速测试的标记
+pytestmark = [
+    pytest.mark.skipif(
+        not pytest.config.getoption("--runslow", default=False) if hasattr(pytest, 'config') else True,
+        reason="需要 --runslow 选项运行慢速测试"
+    ) if False else pytest.mark.filterwarnings("ignore"),  # 保持测试启用但需要足够超时
+]
 
 
 @dataclass
@@ -294,7 +308,7 @@ class StressTestSimulator:
         return f"s_{self._order_id_counter}"
 
     def _sync_to_target(self, result: MaintenanceResult) -> CurrentOrderbook:
-        """直接同步到目标订单簿"""
+        """直接同步到目标订单簿（仅用于指标计算测试）"""
         target = result.target_snapshot
 
         new_bids = [
@@ -317,6 +331,43 @@ class StressTestSimulator:
             for o in target.asks
         ]
 
+        return CurrentOrderbook(bids=new_bids, asks=new_asks)
+
+    def _execute_operations(self, result: MaintenanceResult) -> CurrentOrderbook:
+        """
+        模拟真实执行操作（用于订单累积测试）
+        
+        根据 result.operations 实际执行 add/cancel，
+        而不是直接同步到目标订单簿。
+        """
+        new_bids = list(self.current_orderbook.bids)
+        new_asks = list(self.current_orderbook.asks)
+        
+        # 构建 order_id 索引
+        bid_ids = {o.order_id for o in new_bids}
+        ask_ids = {o.order_id for o in new_asks}
+        
+        for op in result.operations:
+            if op.action == "add":
+                new_order = ExistingOrder(
+                    order_id=self._generate_order_id(),
+                    price=op.price,
+                    quantity=op.quantity,
+                    side=op.side,
+                )
+                if op.side == "bid":
+                    new_bids.append(new_order)
+                else:
+                    new_asks.append(new_order)
+            
+            elif op.action == "cancel":
+                if op.side == "bid" and op.order_id in bid_ids:
+                    new_bids = [o for o in new_bids if o.order_id != op.order_id]
+                    bid_ids.discard(op.order_id)
+                elif op.side == "ask" and op.order_id in ask_ids:
+                    new_asks = [o for o in new_asks if o.order_id != op.order_id]
+                    ask_ids.discard(op.order_id)
+        
         return CurrentOrderbook(bids=new_bids, asks=new_asks)
 
     def run_stress_test(
@@ -935,10 +986,15 @@ def stress_config() -> MaintainerConfig:
     )
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(600)  # 10 分钟超时
 class TestMillionCycleStress:
-    """百万级周期压力测试"""
+    """百万级周期压力测试
+    
+    需要较长时间运行，默认 pytest 超时会导致失败。
+    运行方式: pytest tests/orderbook/maintainer/test_stress.py -m slow --timeout=600 -v
+    """
 
-    @pytest.mark.slow
     def test_1_million_random_walk(self, stress_config: MaintainerConfig):
         """
         100万次随机游走压力测试
@@ -971,7 +1027,6 @@ class TestMillionCycleStress:
         assert stats.negative_spread_count == 0, f"发生负价差: {stats.negative_spread_count}次"
         assert stats.order_count_violations < 100, f"订单数量违规过多: {stats.order_count_violations}"
 
-    @pytest.mark.slow
     def test_1_million_trending_up(self, stress_config: MaintainerConfig):
         """
         100万次趋势上涨压力测试
@@ -998,7 +1053,6 @@ class TestMillionCycleStress:
         assert stats.avg_vii < 0.12, f"平均VII过高: {stats.avg_vii}"
         assert stats.price_cross_count == 0, f"发生价格交叉: {stats.price_cross_count}次"
 
-    @pytest.mark.slow
     def test_1_million_trending_down(self, stress_config: MaintainerConfig):
         """
         100万次趋势下跌压力测试
@@ -1025,7 +1079,6 @@ class TestMillionCycleStress:
         assert stats.price_cross_count == 0, f"发生价格交叉: {stats.price_cross_count}次"
         assert stats.min_nav > Decimal("0.001"), "净值不应过低"
 
-    @pytest.mark.slow
     def test_1_million_high_volatility(self, stress_config: MaintainerConfig):
         """
         100万次高波动压力测试
@@ -1051,7 +1104,6 @@ class TestMillionCycleStress:
         assert stats.max_vii < 0.35, f"最大VII过高: {stats.max_vii}"
         assert stats.price_cross_count == 0, f"发生价格交叉: {stats.price_cross_count}次"
 
-    @pytest.mark.slow
     def test_1_million_mean_reverting(self, stress_config: MaintainerConfig):
         """
         100万次均值回归压力测试
@@ -1079,7 +1131,6 @@ class TestMillionCycleStress:
         # 最终价格应该接近均值
         assert Decimal("0.5") < stats.end_nav < Decimal("2.0"), f"最终净值偏离均值过远: {stats.end_nav}"
 
-    @pytest.mark.slow
     def test_1_million_volatile_spikes(self, stress_config: MaintainerConfig):
         """
         100万次突发波动压力测试
@@ -1107,7 +1158,6 @@ class TestMillionCycleStress:
         assert stats.max_vii < 0.30, f"最大VII过高: {stats.max_vii}"
         assert stats.price_cross_count == 0, f"发生价格交叉: {stats.price_cross_count}次"
 
-    @pytest.mark.slow
     def test_1_million_flash_crash(self, stress_config: MaintainerConfig):
         """
         100万次闪崩恢复压力测试
@@ -1137,11 +1187,15 @@ class TestMillionCycleStress:
         assert stats.negative_spread_count == 0, f"发生负价差: {stats.negative_spread_count}次"
 
 
+@pytest.mark.slow
+@pytest.mark.stress
+@pytest.mark.timeout(3600)  # 1 小时超时
 class TestTenMillionCycleStress:
-    """千万级周期压力测试"""
+    """千万级周期压力测试
+    
+    运行方式: pytest tests/orderbook/maintainer/test_stress.py -m stress --timeout=3600 -v
+    """
 
-    @pytest.mark.slow
-    @pytest.mark.stress
     def test_10_million_cycles(self, stress_config: MaintainerConfig):
         """
         1000万次超长压力测试
@@ -1168,8 +1222,12 @@ class TestTenMillionCycleStress:
         assert stats.negative_spread_count == 0, f"发生负价差: {stats.negative_spread_count}次"
 
 
+@pytest.mark.timeout(120)  # 2 分钟超时
 class TestQuickStress:
-    """快速压力测试（用于CI）"""
+    """快速压力测试（用于CI）
+    
+    这个测试较快，可以在CI中常规运行。
+    """
 
     def test_100k_quick_stress(self, stress_config: MaintainerConfig):
         """
@@ -1195,6 +1253,135 @@ class TestQuickStress:
         assert stats.avg_vii < 0.10, f"平均VII过高: {stats.avg_vii}"
         assert stats.price_cross_count == 0, f"发生价格交叉: {stats.price_cross_count}次"
         assert stats.negative_spread_count == 0, f"发生负价差: {stats.negative_spread_count}次"
+
+
+@pytest.mark.timeout(300)  # 5 分钟超时
+class TestRealisticExecutionStress:
+    """
+    真实执行逻辑的压力测试
+
+    与 TestMillionCycleStress 不同，这里使用 _execute_operations
+    模拟真实的操作执行，而不是直接同步到目标订单簿。
+    
+    运行方式: pytest tests/orderbook/maintainer/test_stress.py::TestRealisticExecutionStress -v
+    """
+
+    def test_realistic_10k_cycles(self, stress_config: MaintainerConfig):
+        """
+        1万次真实执行压力测试
+
+        验证订单不会无限累积
+        """
+        simulator = StressTestSimulator(stress_config)
+        simulator.reset()
+
+        nav = Decimal("1.0")
+        simulator.maintainer.generate_initial(nav)
+
+        expected_per_side = stress_config.total_orders_per_side
+        max_allowed = expected_per_side * 4  # 允许最多 4 倍
+
+        max_order_count = 0
+        accumulation_violations = 0
+
+        for i in range(10_000):
+            # 随机 NAV 变化
+            nav_change = Decimal(str(random.uniform(-0.02, 0.02)))
+            nav = nav * (1 + nav_change)
+            nav = max(nav, Decimal("0.1"))
+
+            result = simulator.maintainer.maintain(simulator.current_orderbook, nav)
+
+            # 使用真实执行逻辑
+            simulator.current_orderbook = simulator._execute_operations(result)
+
+            current_count = simulator.current_orderbook.total_orders
+            max_order_count = max(max_order_count, current_count)
+
+            if current_count > max_allowed:
+                accumulation_violations += 1
+
+        print(f"\n真实执行压力测试结果:")
+        print(f"  最大订单数: {max_order_count}")
+        print(f"  目标订单数: {expected_per_side * 2}")
+        print(f"  累积违规次数: {accumulation_violations}")
+
+        # 关键断言：订单不应无限累积
+        assert accumulation_violations < 100, (
+            f"订单累积违规 {accumulation_violations} 次，"
+            f"最大订单数 {max_order_count}"
+        )
+
+    def test_realistic_with_large_initial(self, stress_config: MaintainerConfig):
+        """
+        从大量初始订单开始的真实执行测试
+
+        验证系统能够逐步减少过量订单
+        """
+        simulator = StressTestSimulator(stress_config)
+        simulator.reset()
+
+        nav = Decimal("1.0")
+        simulator.maintainer.generate_initial(nav)
+
+        # 创建过量的初始订单
+        initial_bids = []
+        initial_asks = []
+        for i in range(150):
+            initial_bids.append(
+                ExistingOrder(
+                    order_id=f"init_bid_{i}",
+                    price=nav * (1 - Decimal("0.001") * (i + 1)),
+                    quantity=Decimal("100"),
+                    side="bid",
+                )
+            )
+            initial_asks.append(
+                ExistingOrder(
+                    order_id=f"init_ask_{i}",
+                    price=nav * (1 + Decimal("0.001") * (i + 1)),
+                    quantity=Decimal("100"),
+                    side="ask",
+                )
+            )
+
+        simulator.current_orderbook = CurrentOrderbook(
+            bids=initial_bids,
+            asks=initial_asks,
+        )
+
+        initial_count = simulator.current_orderbook.total_orders  # 300
+        expected_per_side = stress_config.total_orders_per_side
+        target_count = expected_per_side * 2
+
+        counts = [initial_count]
+
+        # 运行 100 个周期
+        for i in range(100):
+            nav_change = Decimal(str(random.uniform(-0.01, 0.01)))
+            nav = nav * (1 + nav_change)
+
+            result = simulator.maintainer.maintain(simulator.current_orderbook, nav)
+            simulator.current_orderbook = simulator._execute_operations(result)
+
+            counts.append(simulator.current_orderbook.total_orders)
+
+        final_count = counts[-1]
+
+        print(f"\n大初始订单测试结果:")
+        print(f"  初始订单数: {initial_count}")
+        print(f"  最终订单数: {final_count}")
+        print(f"  目标订单数: {target_count}")
+
+        # 订单数应该减少
+        assert final_count < initial_count, (
+            f"订单数应该减少: {initial_count} -> {final_count}"
+        )
+
+        # 应该趋向目标
+        assert final_count < target_count * 2, (
+            f"最终订单数 {final_count} 应接近目标 {target_count}"
+        )
 
 
 # 命令行运行入口
