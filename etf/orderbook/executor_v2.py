@@ -238,7 +238,12 @@ class OrderExecutorV2:
         cancel_count: int,
     ) -> bool:
         """
-        判断是否会发生订单溢出
+        判断是否会发生订单溢出（优化版）
+
+        新逻辑：
+        - 如果最终订单数 <= max_orders，允许临时超限（利用交易所弹性空间）
+        - 临时超限最多允许 max_temp_overflow 个订单（默认50）
+        - 这样可以保持"先加后删"策略，避免盘口深度骤降
 
         Args:
             current_count: 当前订单数
@@ -246,15 +251,45 @@ class OrderExecutorV2:
             cancel_count: 待取消数量
 
         Returns:
-            bool: 是否溢出
+            bool: 是否溢出（True = 需要先删后加）
         """
-        # 如果先加后删，峰值订单数
-        peak_count = current_count + add_count
+        # 计算最终订单数（操作完成后）
+        final_count = current_count + add_count - cancel_count
 
-        # 溢出阈值
-        threshold = int(self.max_orders * self.order_overflow_threshold)
+        # 获取允许的临时超限数量
+        max_temp_overflow = self.config.get("max_temp_overflow", 50)
 
-        return peak_count > threshold
+        # 如果最终订单数在限制内，考虑允许临时超限
+        if final_count <= self.max_orders:
+            # 计算峰值订单数（先加后删时的最大值）
+            peak_count = current_count + add_count
+
+            # 计算临时超限数量
+            temp_overflow = peak_count - self.max_orders
+
+            # 如果临时超限在允许范围内，不算溢出（使用 add_first）
+            if temp_overflow <= max_temp_overflow:
+                if temp_overflow > 0:
+                    self.logger.debug(
+                        f"允许临时超限: 当前 {current_count}, "
+                        f"+{add_count}/-{cancel_count}, "
+                        f"峰值 {peak_count}, 最终 {final_count}, "
+                        f"临时超限 {temp_overflow} <= {max_temp_overflow}"
+                    )
+                return False
+
+            # 临时超限过多，需要先删后加
+            self.logger.info(
+                f"临时超限过多: 峰值 {peak_count}, "
+                f"超限 {temp_overflow} > {max_temp_overflow}, 使用 cancel_first"
+            )
+            return True
+
+        # 最终订单数超限，必须先删后加
+        self.logger.warning(
+            f"最终订单数超限: {final_count} > {self.max_orders}, 必须使用 cancel_first"
+        )
+        return True
 
     def _execute_adds(
         self,
