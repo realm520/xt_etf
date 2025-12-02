@@ -254,15 +254,16 @@ def main():
     # 加载策略配置（合并全局默认 + 策略特定配置）
     strategy_config = load_strategy_config(args.strategy)
     
-    # 加载全局配置用于数据库等设置
+    # 加载全局配置用于文件持久化等设置
     full_config = load_config()
 
     # 获取策略特定参数
     strategy_params = get_strategy_params(args.strategy)
 
-    # 获取数据库持久化配置
-    db_config = full_config.get("database", {}).get("net_value_persistence", {})
-    enable_db_persistence = db_config.get("enabled", False)
+    # 获取文件持久化配置
+    file_config = full_config.get("file_persistence", {}).get("net_value", {})
+    enable_file_persistence = file_config.get("enabled", True)
+    file_flush_interval = file_config.get("flush_interval", 60)
 
     # 构建净值计算参数
     net_value_params = {
@@ -279,8 +280,9 @@ def main():
         or strategy_config.get("max_single_change", 0.10),
         "max_restart_gap": args.max_restart_gap
         or strategy_config.get("max_restart_gap", 300),
-        # 数据库持久化参数
-        "enable_db_persistence": enable_db_persistence,
+        # 文件持久化参数
+        "enable_file_persistence": enable_file_persistence,
+        "file_flush_interval": file_flush_interval,
         "strategy_name": args.strategy,
     }
 
@@ -326,10 +328,10 @@ def main():
     logging.info(
         f"参数配置: {json.dumps({k: v for k, v in net_value_params.items() if k != 'strategy_name'}, indent=2, ensure_ascii=False)}"
     )
-    if enable_db_persistence:
-        logging.info(f"✅ 数据库持久化已启用 - 批量大小: {db_config.get('batch_size', 40)}, 刷新间隔: {db_config.get('flush_interval', 10)}秒")
+    if enable_file_persistence:
+        logging.info(f"✅ 文件持久化已启用 - 目录: {file_config.get('data_dir', 'data/net_value')}, 刷新间隔: {file_flush_interval}秒")
     else:
-        logging.info("⚠️  数据库持久化已禁用 - 仅使用Redis存储")
+        logging.info("⚠️  文件持久化已禁用 - 仅使用Redis存储")
 
     # 创建并运行改进版净值计算器
     try:

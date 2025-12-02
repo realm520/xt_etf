@@ -90,20 +90,14 @@ defaults:
     check_interval: 60             # 检查间隔（秒）
 
 # ========================================
-# 数据库配置
+# 文件持久化配置
 # ========================================
-database:
-  # PostgreSQL 连接配置（通过环境变量设置）
-  # POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB
-
-  net_value_persistence:
+file_persistence:
+  # 净值记录
+  net_value:
     enabled: true
-    batch_size: 40               # 批量大小
+    data_dir: "data/net_value"   # 数据目录
     flush_interval: 10           # 刷新间隔（秒）
-    enable_partitioning: false   # 月度分区（生产推荐启用）
-
-  order_persistence:
-    enabled: false               # 当前使用CSV降级
 
 # ========================================
 # 策略特定配置（按需覆盖全局默认值）

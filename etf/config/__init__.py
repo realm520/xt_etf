@@ -6,7 +6,7 @@ ETF 配置管理模块
 - 策略配置
 - 环境变量
 - API 密钥
-- 数据库配置
+- Redis 配置
 """
 
 from etf.config.loader import (
@@ -21,9 +21,7 @@ from etf.config.loader import (
     # API 密钥
     load_api_keys,
     load_binance_api_keys,
-    # 数据库配置
-    get_db_config,
-    get_db_url,
+    # Redis 配置
     get_redis_config,
 )
 
@@ -39,8 +37,6 @@ __all__ = [
     # API 密钥
     "load_api_keys",
     "load_binance_api_keys",
-    # 数据库配置
-    "get_db_config",
-    "get_db_url",
+    # Redis 配置
     "get_redis_config",
 ]

@@ -403,47 +403,8 @@ def load_binance_api_keys() -> Dict[str, str]:
 
 
 # ============================================================================
-# 数据库配置
+# Redis 配置
 # ============================================================================
-
-def get_db_config() -> Dict[str, Any]:
-    """
-    获取数据库配置
-    
-    从环境变量读取 PostgreSQL 配置
-    
-    Returns:
-        数据库配置字典
-    """
-    init_env()
-    
-    return {
-        "host": os.getenv("POSTGRES_HOST", "localhost"),
-        "port": int(os.getenv("POSTGRES_PORT", "5432")),
-        "user": os.getenv("POSTGRES_USER", "postgres"),
-        "password": os.getenv("POSTGRES_PASSWORD", ""),
-        "database": os.getenv("POSTGRES_DB", "xt_etf"),
-    }
-
-
-def get_db_url(async_driver: bool = False) -> str:
-    """
-    获取数据库连接 URL
-    
-    Args:
-        async_driver: 是否使用异步驱动
-        
-    Returns:
-        SQLAlchemy 连接 URL
-    """
-    config = get_db_config()
-    driver = "postgresql+asyncpg" if async_driver else "postgresql+psycopg2"
-    
-    return (
-        f"{driver}://{config['user']}:{config['password']}"
-        f"@{config['host']}:{config['port']}/{config['database']}"
-    )
-
 
 def get_redis_config() -> Dict[str, Any]:
     """
