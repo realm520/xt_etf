@@ -37,6 +37,54 @@ defaults:
   Enable_hedging: false            # 对冲
   Enable_market_making: true       # 做市
 
+  # ========================================
+  # 对冲系统配置
+  # ========================================
+  hedging:
+    enabled: false                   # 是否启用对冲
+    interval: 20                     # 对冲检查间隔（秒）
+
+    # 对冲策略配置
+    strategy:
+      type: "fixed"                  # 策略类型: fixed | dynamic
+      fixed:
+        ratio: 1.0                   # 对冲比例（1.0 = 金额对冲）
+        min_hedge_value: 10          # 最小对冲金额 (USDT)
+        min_hedge_qty: 0.001         # 最小对冲数量
+        urgency_base: 10000.0        # 紧急程度基准值
+      dynamic:
+        base_ratio: 1.0              # 基础对冲比例
+        volatility_multiplier: 2.0   # 波动率乘数
+        max_ratio: 3.0               # 最大对冲比例
+        min_ratio: 0.5               # 最小对冲比例
+        min_hedge_value: 10
+        min_hedge_qty: 0.001
+
+    # 订单执行配置
+    execution:
+      type: "market"                 # 执行类型: market
+      max_retries: 3                 # 最大重试次数
+      retry_delay: 1.0               # 重试间隔（秒）
+      slippage_tolerance: 0.01       # 滑点容忍度 (1%)
+      timeout: 30.0                  # 超时时间（秒）
+
+    # 价格验证配置
+    price_validation:
+      enabled: true                  # 是否启用价格验证
+      max_price_change: 0.05         # 最大单次价格变化 (5%)
+      max_deviation: 0.03            # 最大偏离均值 (3%)
+      history_size: 20               # 历史价格记录数
+      stale_threshold: 60.0          # 价格过期阈值（秒）
+
+    # 监控配置
+    monitoring:
+      csv_enabled: true              # 是否启用CSV记录
+      log_dir: "logs/hedging"        # 日志目录
+      max_memory_records: 1000       # 内存最大记录数
+
+    # 最低价格置信度（低于此值不执行对冲）
+    min_confidence: 0.5
+
   # 交易参数
   wash: "mid_price"
   anti_pin_usdt: 300
@@ -56,6 +104,7 @@ defaults:
     max_operations_per_cycle: 100  # 每周期最大操作数
     max_orders: 200                # 最大订单数（XT交易所限制）
     order_overflow_threshold: 0.85 # 订单溢出阈值
+    max_temp_overflow: 50          # 允许临时超限的订单数（利用交易所弹性空间）
 
     # 近盘口配置（等差分布，密集）
     near_layer:

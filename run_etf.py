@@ -6,7 +6,8 @@ from etf.xt import Spot
 from etf.stability_monitor import StabilityMonitor
 from etf.websocket import XTWebSocketClient
 from etf.symbol_config import SymbolConfigManager  # Symbol配置管理器
-from hedging import Hedge
+from hedging import Hedge  # 旧版对冲（向后兼容）
+from etf.hedging import create_hedge_orchestrator  # 新版模块化对冲系统
 from etf.observability import init_otel, MetricsCollector, PrometheusServer  # Prometheus 集成
 from etf.utils.logger import setup_logging  # 新增：统一日志配置工具
 import json
@@ -799,18 +800,12 @@ def main():
             log_shutdown(strategy_name, config)
 
             # ✅ 步骤2: 根据环境变量决定是否撤单
-            cancel_on_exit = os.getenv("CANCEL_ORDERS_ON_EXIT", "true").lower() == "true"
-            
-            if cancel_on_exit:
-                logging.info("🛑 步骤2: 撤销所有挂单 (CANCEL_ORDERS_ON_EXIT=true)")
-                try:
-                    order_manager.cancel_all_open_orders(config["symbol"])
-                    logging.info("✅ 已撤销所有挂单")
-                except Exception as e:
-                    logging.error(f"撤销挂单失败: {e}")
-            else:
-                logging.info("ℹ️ 步骤2: 保留所有挂单 (CANCEL_ORDERS_ON_EXIT=false)")
-                logging.info("   做市订单将继续工作，直到手动撤销或被成交")
+            logging.info("🛑 步骤2: 撤销所有挂单 (CANCEL_ORDERS_ON_EXIT=true)")
+            try:
+                order_manager.cancel_all_open_orders(config["symbol"])
+                logging.info("✅ 已撤销所有挂单")
+            except Exception as e:
+                logging.error(f"撤销挂单失败: {e}")
 
             logging.info("=" * 70)
             logging.info("✅ 程序退出流程完成")
@@ -885,11 +880,40 @@ def main():
                 depth = {"bids": [], "asks": []}
         logging.info(depth)
 
-        # ❌ make_orders 已废弃 (2025-11-21)
-        hedging = Hedge()
+        # ═══════════════════════════════════════════════════════════
+        # 对冲系统初始化
+        # ═══════════════════════════════════════════════════════════
+        hedge_orchestrator = None
+        if config.get("Enable_hedging", False):
+            hedging_config = config.get("hedging", {})
+            if hedging_config.get("enabled", False):
+                # 使用新版模块化对冲系统
+                try:
+                    from etf.binance_client import BinanceClient
+                    from etf.config import load_binance_api_keys
+
+                    bn_keys = load_binance_api_keys()
+                    bn_client = BinanceClient(bn_keys["access_key"], bn_keys["secret_key"])
+
+                    hedge_orchestrator = create_hedge_orchestrator(
+                        client=bn_client,
+                        config=hedging_config,
+                        symbol=config.get("bnsymbol", "TONUSDT"),
+                        leverage=config.get("leverage", 3),
+                    )
+                    logging.info(f"✅ 新版对冲系统初始化完成: {hedge_orchestrator.get_status()}")
+                except Exception as e:
+                    logging.error(f"❌ 新版对冲系统初始化失败: {e}")
+                    hedge_orchestrator = None
+            else:
+                # 使用旧版对冲（向后兼容）
+                logging.info("使用旧版对冲系统（向后兼容模式）")
+                hedging = Hedge()
 
         # thread2 = threading.Thread(target=EtfStrategy.run, args=(config, risk_controller, wash_controller, market_maker))
-        if config["Enable_hedging"]:
+        if config["Enable_hedging"] and hedge_orchestrator is None:
+            # 旧版对冲线程
+            hedging = Hedge()
             thread3 = threading.Thread(
                 target=hedging.run, args=(order_manager, config), daemon=True
             )
@@ -899,10 +923,45 @@ def main():
             )
 
         # thread2.start()
-        if config["Enable_hedging"]:
+        if config["Enable_hedging"] and hedge_orchestrator is None:
             thread3.start()
         if config["Enable_wash_trading"]:
             thread4.start()
+
+        # 新版对冲系统异步运行
+        if hedge_orchestrator is not None:
+            async def run_hedge_loop():
+                """对冲主循环"""
+                interval = config.get("hedging", {}).get("interval", 20)
+                logging.info(f"🔄 新版对冲系统启动，检查间隔: {interval}s")
+
+                while True:
+                    try:
+                        # 从 order_manager 获取持仓变化
+                        xt_delta = order_manager.get_position_delta() if hasattr(order_manager, 'get_position_delta') else 0
+
+                        if xt_delta != 0:
+                            from decimal import Decimal
+                            result = await hedge_orchestrator.check_and_hedge(
+                                xt_position_delta=Decimal(str(xt_delta)),
+                            )
+                            if result:
+                                logging.info(f"对冲执行结果: {result.to_dict()}")
+
+                        await asyncio.sleep(interval)
+                    except Exception as e:
+                        logging.error(f"对冲循环异常: {e}")
+                        await asyncio.sleep(interval)
+
+            # 在单独线程中运行异步对冲循环
+            def start_hedge_loop():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(run_hedge_loop())
+
+            hedge_thread = threading.Thread(target=start_hedge_loop, daemon=True)
+            hedge_thread.start()
+            logging.info("✅ 新版对冲线程已启动")
 
         # thread2.join()
         # if config["Enable_hedging"]:
