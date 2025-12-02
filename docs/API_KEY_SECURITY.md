@@ -4,6 +4,16 @@
 
 本文档说明如何安全地管理 XT ETF 交易系统的 API 密钥，确保生产环境的密钥安全。
 
+> **⚡ 推荐方式**: 使用 `.env` 文件管理 API 密钥（详见 [ENV_CONFIGURATION.md](ENV_CONFIGURATION.md)）
+>
+> ```bash
+> # .env 文件示例
+> access_key=your_access_key_here
+> secret_key=your_secret_key_here
+> ```
+>
+> 以下加密文件方式为**高级安全选项**，适用于需要额外保护的场景。
+
 ## ⚠️ 重要警告
 
 **绝对禁止**:
@@ -13,9 +23,9 @@
 - ❌ 通过不安全的渠道传输密钥
 
 **强制要求**:
-- ✅ 生产环境必须使用加密的 .enc 文件
+- ✅ 优先使用 `.env` 文件（已在 .gitignore 中）
+- ✅ 高安全场景使用加密的 .enc 文件
 - ✅ 加密密码必须通过环境变量管理
-- ✅ 密钥文件已在 .gitignore 中配置
 - ✅ 定期轮换 API 密钥
 
 ---

@@ -42,9 +42,9 @@ secret_key=your_secret_key_here
 ```
 
 **注意**: 
-- `.env` 文件优先级 **高于** `APIKey.json`
-- 推荐使用 `.env` 方式管理密钥（更安全，不会误提交到Git）
+- `.env` 文件是**唯一推荐**的 API 密钥配置方式（`APIKey.json` 已废弃）
 - `.env` 文件已在 `.gitignore` 中，不会被提交到版本控制
+- 详细安全指南请参考 [API_KEY_SECURITY.md](API_KEY_SECURITY.md)
 
 ### 2. PostgreSQL数据库配置（可选）
 
@@ -188,15 +188,11 @@ python run_net_value.py --strategy ton3l --env prod
    python run_net_value.py --strategy ton3l --init-net-value 1.0
    ```
 
-2. **环境变量 (.env 文件)** - 次优先级
-   ```bash
-   access_key=from_env_file
-   ```
-
-3. **策略配置文件 (config/strategies.yaml)** - 最低优先级
+2. **策略配置文件 (config/strategies.yaml)** - 可选覆盖
    ```yaml
    ton3l:
-     apikey: "APIKey.json"
+     # 如需特定策略使用不同的密钥，可在此处指定
+     # 但推荐统一使用 .env 文件管理
    ```
 
 ---

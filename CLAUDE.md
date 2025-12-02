@@ -93,18 +93,6 @@ python run_etf.py --strategy stg3s  # 3x short strategy
 python run_etf.py --strategy stg5l  # 5x long strategy
 python run_etf.py --strategy stg5s  # 5x short strategy
 
-# Using convenience scripts
-./scripts/run_stg3l.sh  # 3x long
-./scripts/run_stg3s.sh  # 3x short
-./scripts/run_stg5l.sh  # 5x long
-./scripts/run_stg5s.sh  # 5x short
-
-# Development mode (starts both net value and trading)
-./scripts/dev_start.sh stg3l  # 3x long with net value service
-./scripts/dev_start.sh stg3s  # 3x short with net value service
-./scripts/dev_start.sh stg5l  # 5x long with net value service
-./scripts/dev_start.sh stg5s  # 5x short with net value service
-
 # Override parameters
 python run_etf.py --strategy stg3l --bid-ask-spread 0.02
 python run_etf.py --strategy stg5s --env qa
@@ -137,23 +125,6 @@ pm2 restart etf-stg3l
 pm2 list
 ```
 
-#### Low-Frequency Strategy Monitoring
-```bash
-# Run monitoring script
-python monitor_low_freq.py
-
-# Run tests for low-frequency parameters
-pytest tests/test_low_frequency_strategy.py -v
-```
-
-#### Legacy Method (Original scripts archived in `legacy/`)
-```bash
-# Original scripts (still available but not recommended)
-python legacy/run_etf_stg3l.py
-python legacy/run_etf_stg3s.py
-python legacy/run_etf_stg5l.py
-python legacy/run_etf_stg5s.py
-```
 
 #### Other Components
 ```bash
@@ -366,23 +337,6 @@ stop_loss:
   enable_partial_close: true
 ```
 
-### 📊 项目状态
-
-**生产就绪度**: 85%
-
-**健康度评分**: ⭐⭐⭐⭐☆ (4.2/5.0)
-
-**主要优势**:
-- ✅ 核心功能完整且稳定
-- ✅ 风险控制系统健全
-- ✅ 文档完善，易于维护
-- ✅ 生产环境就绪
-
-**待完善项** (详见 `docs/TECHNICAL_DEBT.md`):
-- ⏳ 订单记录器PostgreSQL集成（1周）
-- ⏳ 稳定性监控异步实现（2周）
-- ⏳ 测试覆盖率提升到80%+（1个月）
-
 ---
 
 ## Architecture Overview
@@ -436,13 +390,6 @@ stop_loss:
 access_key=your_access_key_here
 secret_key=your_secret_key_here
 
-# PostgreSQL配置（可选）
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=your_password
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-POSTGRES_DB=xt_etf
-
 # OpenTelemetry配置（可选）
 ENABLE_OTEL=true
 OTLP_ENDPOINT=http://localhost:4317
@@ -476,60 +423,6 @@ CANCEL_ORDERS_ON_EXIT=true  # true: 退出时撤单, false: 保留订单
 - Integration tests for exchange connectivity
 - Mock WebSocket servers for testing real-time features
 - Async test support throughout
-
-## Graceful Shutdown（优雅退出机制）
-
-程序退出时会执行以下步骤，确保安全和数据完整性：
-
-### 退出流程
-
-1. **停止洗盘交易**（如果启用）
-   - 设置停止标志，阻止新的洗盘交易
-   - 等待当前交易完成（最多60秒）
-   - 确保不会在交易执行中途被打断
-
-2. **清理系统资源**
-   - 清理Redis初始化标志
-   - 停止Symbol配置管理器自动刷新
-   - 关闭WebSocket连接
-   - 停止稳定性监控
-
-3. **订单处理**（可配置）
-   - 根据环境变量 `CANCEL_ORDERS_ON_EXIT` 决定是否撤单
-   - `true`（默认）: 撤销所有挂单，清空订单簿
-   - `false`: 保留做市订单，让它们继续工作
-
-### 环境变量配置
-
-```bash
-# 退出时撤销所有订单（默认行为）
-export CANCEL_ORDERS_ON_EXIT=true
-
-# 退出时保留订单（适合需要保持做市的场景）
-export CANCEL_ORDERS_ON_EXIT=false
-```
-
-### 使用场景
-
-**撤单模式** (`CANCEL_ORDERS_ON_EXIT=true`):
-- 适合日常维护、升级、重启
-- 确保没有悬空订单
-- 避免意外成交
-
-**保留订单模式** (`CANCEL_ORDERS_ON_EXIT=false`):
-- 适合短暂重启（如配置热更新）
-- 保持市场流动性
-- 减少订单簿重建时间
-
-### 触发方式
-
-程序退出会自动执行清理流程，无需手动操作：
-- Ctrl+C（SIGINT）
-- `kill` 命令（SIGTERM）
-- PM2 stop/restart
-- 系统关机
-
-**注意**: 使用 `kill -9`（SIGKILL）会跳过清理流程，可能导致订单残留。
 
 ## Important Considerations
 

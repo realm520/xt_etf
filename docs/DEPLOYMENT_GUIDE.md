@@ -150,9 +150,11 @@ sudo apt install redis-server
 sudo systemctl start redis
 sudo systemctl enable redis
 
-# 4. 配置开发API密钥
-cp APIKey_template.json APIKey_dev.json
-# 编辑APIKey_dev.json添加测试API密钥
+# 4. 配置开发API密钥（使用 .env 文件）
+cp .env.example .env
+# 编辑 .env 文件添加测试API密钥
+# access_key=your_test_access_key
+# secret_key=your_test_secret_key
 
 # 5. 运行测试
 ./scripts/run_tests.sh

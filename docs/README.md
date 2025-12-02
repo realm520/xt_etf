@@ -25,7 +25,6 @@
 
 | 文档 | 说明 |
 |------|------|
-| [ORDERBOOK_USAGE.md](ORDERBOOK_USAGE.md) | 订单簿模块使用指南 |
 | [INITIALIZATION_SYSTEM.md](INITIALIZATION_SYSTEM.md) | 系统初始化机制说明 |
 | [LOW_FREQUENCY_STRATEGY.md](LOW_FREQUENCY_STRATEGY.md) | 低频交易策略参数说明 |
 | [KLINE_MICRO_TRADES_IMPLEMENTATION.md](KLINE_MICRO_TRADES_IMPLEMENTATION.md) | K线质量优化和微交易实现 |
@@ -56,5 +55,5 @@
 
 ## 文档版本
 
-- **最后更新**: 2025-11-25
+- **最后更新**: 2025-12-02
 - **维护者**: ETF Trading Team

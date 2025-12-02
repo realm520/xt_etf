@@ -38,9 +38,11 @@ source .venv/bin/activate
 # 4. 启动Redis（如未运行）
 redis-server
 
-# 5. 配置API密钥
-cp APIKey_template.json APIKey_prod.json
-# 编辑APIKey_prod.json添加真实API密钥
+# 5. 配置API密钥（使用 .env 文件）
+cp .env.example .env
+# 编辑 .env 文件添加真实API密钥
+# access_key=your_access_key
+# secret_key=your_secret_key
 
 # 6. 启动策略
 python run_etf.py --strategy stg3l
@@ -91,21 +93,24 @@ docker run -d -p 6379:6379 --name redis redis:alpine
 
 ### API密钥配置
 
-创建API密钥文件：
+**推荐方式**: 使用 `.env` 文件（更安全）
 
 ```bash
-cp APIKey_template.json APIKey_prod.json
+# 复制环境变量模板
+cp .env.example .env
+
+# 编辑 .env 文件
+vim .env
 ```
 
-编辑`APIKey_prod.json`：
-```json
-{
-  "api_key": "your_api_key",
-  "secret_key": "your_secret_key",
-  "passphrase": "your_passphrase",
-  "sandbox": false
-}
+在 `.env` 文件中配置：
+```bash
+# XT Exchange API Keys
+access_key=your_access_key_here
+secret_key=your_secret_key_here
 ```
+
+> 💡 详细安全指南请参考 [API_KEY_SECURITY.md](API_KEY_SECURITY.md)
 
 ### 策略配置
 
@@ -526,10 +531,10 @@ pm2 restart all
 
 详见配置文件：
 - `config/strategies.yaml` - 策略配置
-- `APIKey_template.json` - API密钥模板
+- `.env.example` - 环境变量模板（包含 API 密钥配置）
 - `ecosystem.config.js` - PM2配置
 
 ---
 
-*最后更新: 2025-01-22*
-*版本: 1.0.0*
+*最后更新: 2025-12-02*
+*版本: 1.1.0*
